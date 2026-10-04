@@ -5,10 +5,33 @@ worm gearset according to **ANSI/AGMA 6135-A02 (Metric Edition)**. A Python
 backend does the calculations; a browser UI collects inputs and shows results.
 Only the Python standard library is required (Python 3.9+).
 
-```bash
-python app.py            # then open http://127.0.0.1:8000
-python -m unittest discover -s tests
-```
+## Opening the dashboard
+
+**Standalone app (no Python needed):** download the executable for your system
+from the repository's **Actions** tab → latest "Build executables" run →
+*Artifacts* (`WormGearDesigner-Windows`, `-macOS` or `-Linux`), unzip it and
+double-click it. Pushing a tag such as `v1.0` also publishes them on the
+**Releases** page.
+
+**With Python 3.9+ installed:** double-click
+
+* `Start Worm Gear Designer.bat` on Windows
+* `Start Worm Gear Designer.command` on macOS or Linux
+
+Either way, a small console window opens and the dashboard appears in your
+default browser. Keep that window open while you work; close it to quit.
+
+From a terminal: `python app.py` (options: `--port`, `--no-browser`).
+Tests: `python -m unittest discover -s tests`.
+
+To build the executable yourself: `pip install pyinstaller`, then
+`python build_app.py`; the result is in `dist/`. PyInstaller builds for the
+system it runs on, so build on Windows to get the `.exe`.
+
+**First run:** Windows SmartScreen may say "Windows protected your PC" because
+the executable isn't code-signed; choose *More info → Run anyway*. On macOS,
+right-click the file → *Open* the first time; if it won't run, open Terminal
+and run `chmod +x` on the file.
 
 ## Inputs
 
@@ -73,7 +96,10 @@ warnings. Inconsistent or impossible inputs are rejected with a message.
 ## Layout
 
 ```
-app.py                  HTTP server + JSON API (POST /api/calculate)
+app.py                  HTTP server + JSON API (POST /api/calculate), opens the browser
+build_app.py            Builds the standalone executable (PyInstaller)
+Start Worm Gear Designer.bat / .command   Double-click launchers
+.github/workflows/      Builds Windows/macOS/Linux executables on every push
 static/index.html       User interface
 globoid/calculator.py   Calculations (DesignInput -> calculate())
 globoid/tables.py       Tables 2, 6, D.1 and figure F.1 data

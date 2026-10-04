@@ -1,17 +1,22 @@
 """Web UI for the globoidal worm gearset calculator.
 
-Run:  python app.py [--port 8000]
-then open http://localhost:8000 in a browser. Uses only the Python standard library.
+Run:  python app.py [--port 8000] [--no-browser]
+The dashboard opens in the default browser. Uses only the Python standard library.
 """
 
 import argparse
 import json
+import sys
+import threading
+import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from globoid import DesignError, DesignInput, calculate
 
-INDEX_HTML = Path(__file__).with_name("static").joinpath("index.html")
+# When packaged with PyInstaller, bundled files live under sys._MEIPASS.
+BASE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+INDEX_HTML = BASE_DIR / "static" / "index.html"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -52,17 +57,33 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+def make_server(host: str, port: int) -> ThreadingHTTPServer:
+    """Bind to the requested port, or to any free port if it is taken."""
+    try:
+        return ThreadingHTTPServer((host, port), Handler)
+    except OSError:
+        return ThreadingHTTPServer((host, 0), Handler)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--no-browser", action="store_true", help="do not open a browser")
     args = parser.parse_args()
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"Globoidal worm gear calculator running at http://{args.host}:{args.port}")
+    server = make_server(args.host, args.port)
+    url = f"http://{args.host}:{server.server_address[1]}/"
+    print("Double-Enveloping Worm Gearset Designer", flush=True)
+    print(f"Dashboard: {url}", flush=True)
+    print("Keep this window open while using the dashboard. Close it (or press Ctrl+C) to quit.", flush=True)
+    if not args.no_browser:
+        threading.Timer(0.5, webbrowser.open, args=(url,)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        server.server_close()
 
 
 if __name__ == "__main__":
