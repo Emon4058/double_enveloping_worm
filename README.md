@@ -41,12 +41,12 @@ Required:
 |---|---|---|
 | Number of teeth of the worm wheel | z2 | – |
 | Center distance | a | mm |
-| Gear ratio | u | – |
 | Number of starts (threads) of the worm | z1 | – |
 | Normal pressure angle | αn | deg |
 | Axial module | ma | mm |
 
-z2, z1 and u must satisfy eq. (1), z1 = z2/u. The axial module fixes the gear
+The gear ratio is not an input: it is calculated from the tooth counts,
+u = z2/z1 (eq. 1), and shown with the results. The axial module fixes the gear
 pitch diameter, dw2 = ma·z2 (eq. 6), and the worm pitch diameter follows from
 the center distance, dw1 = 2a − dw2 (eq. 4). The UI shows the module implied
 by the eq. (2) first approximation; you can apply it with one click.

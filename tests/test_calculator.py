@@ -20,7 +20,7 @@ def values(result):
     return out
 
 
-BASE = dict(z2=30, a=101.6, u=30, z1=1, alpha_n=20, m_a=5.5)
+BASE = dict(z2=30, a=101.6, z1=1, alpha_n=20, m_a=5.5)
 
 
 class GeometryTests(unittest.TestCase):
@@ -45,9 +45,10 @@ class GeometryTests(unittest.TestCase):
         self.assertAlmostEqual(v["b_1eff"], d_b - 0.02 * 101.6, places=3)
         self.assertAlmostEqual(v["r_g2"], v["r_f2"] - v["h1 = h2"], places=3)
 
-    def test_inconsistent_ratio_rejected(self):
-        with self.assertRaises(DesignError):
-            calculate(DesignInput(**{**BASE, "u": 15}))
+    def test_gear_ratio_is_calculated(self):
+        self.assertEqual(values(calculate(DesignInput(**BASE)))["u"], 30)
+        v = values(calculate(DesignInput(**{**BASE, "z2": 39, "z1": 2, "m_a": 4.2})))
+        self.assertEqual(v["u"], 19.5)  # hunting tooth example from 3.3
 
     def test_module_too_large_rejected(self):
         with self.assertRaises(DesignError):

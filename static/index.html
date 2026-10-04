@@ -79,13 +79,11 @@
     <h2>Design inputs</h2>
     <label for="z2"><b>Number of teeth of worm wheel</b>, z<sub>2</sub></label>
     <input id="z2" name="z2" type="number" min="1" step="1" value="30" required>
-    <label for="a"><b>Center distance</b>, a [mm]</label>
-    <input id="a" name="a" type="number" min="0" step="any" value="101.6" required>
-    <label for="u"><b>Gear ratio</b>, u</label>
-    <input id="u" name="u" type="number" min="0" step="any" value="30" required>
     <label for="z1"><b>Number of starts of worm</b>, z<sub>1</sub></label>
     <input id="z1" name="z1" type="number" min="1" step="1" value="1" required>
     <div class="hint" id="ratioHint"></div>
+    <label for="a"><b>Center distance</b>, a [mm]</label>
+    <input id="a" name="a" type="number" min="0" step="any" value="101.6" required>
     <label for="alpha_n"><b>Normal pressure angle</b>, α<sub>n</sub> [deg]</label>
     <input id="alpha_n" name="alpha_n" type="number" min="0" max="45" step="any" value="20" required>
     <div class="hint">Generally 20 – 25°</div>
@@ -149,15 +147,11 @@ const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':
 const val = id => parseFloat(document.getElementById(id).value);
 
 function updateHints() {
-  const z2 = val('z2'), z1 = val('z1'), u = val('u'), a = val('a');
+  const z2 = val('z2'), z1 = val('z1'), a = val('a');
   const rh = document.getElementById('ratioHint');
-  if (z2 > 0 && z1 > 0) {
-    const r = z2 / z1;
-    const ok = u > 0 && Math.abs(r - u) <= 1e-3 * u;
-    rh.innerHTML = `z<sub>2</sub>/z<sub>1</sub> = ${+r.toFixed(4)}` +
-      (ok ? ' <span class="ok">matches u</span>' :
-            ` <span class="bad">≠ u</span> <button type="button" data-u="${r}">use ${+r.toFixed(4)}</button>`);
-  } else rh.textContent = '';
+  rh.innerHTML = z2 > 0 && z1 > 0
+    ? `Gear ratio u = z<sub>2</sub>/z<sub>1</sub> = <b>${+(z2 / z1).toFixed(4)}</b>`
+    : '';
   const mh = document.getElementById('moduleHint');
   if (a > 0 && z2 > 0) {
     const ma = (2 * a - Math.pow(a, 0.875) / 1.47) / z2;
@@ -166,10 +160,9 @@ function updateHints() {
 }
 form.addEventListener('input', updateHints);
 form.addEventListener('click', e => {
-  const b = e.target.closest('button[data-u], button[data-ma]');
+  const b = e.target.closest('button[data-ma]');
   if (!b) return;
-  if (b.dataset.u) document.getElementById('u').value = +(+b.dataset.u).toFixed(6);
-  if (b.dataset.ma) document.getElementById('m_a').value = b.dataset.ma;
+  document.getElementById('m_a').value = b.dataset.ma;
   updateHints();
 });
 updateHints();

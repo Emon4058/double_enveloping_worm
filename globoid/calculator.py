@@ -25,7 +25,6 @@ from .tables import (
 )
 
 E_STEEL = 206_850.0  # N/mm^2, Annex B.5
-RATIO_TOLERANCE = 1e-3
 
 
 class DesignError(ValueError):
@@ -41,7 +40,6 @@ class DesignInput:
     # Required inputs
     z2: int  # number of teeth in gear (worm wheel)
     a: float  # center distance, mm
-    u: float  # gear ratio
     z1: int  # number of threads (starts) in worm
     alpha_n: float  # normal pressure angle, degrees
     m_a: float  # axial module, mm
@@ -60,6 +58,11 @@ class DesignInput:
     worm_yield: Optional[float] = None  # worm core yield strength, N/mm^2
     youngs_modulus: float = E_STEEL  # worm core material, N/mm^2
 
+    @property
+    def u(self) -> float:
+        """Gear ratio, from eq. (1): u = z2/z1."""
+        return self.z2 / self.z1
+
     @classmethod
     def from_dict(cls, data: dict) -> "DesignInput":
         def num(key, cast=float, default=None):
@@ -71,7 +74,7 @@ class DesignInput:
             except (TypeError, ValueError):
                 raise DesignError([f"'{key}' must be a number, got {value!r}"])
 
-        required = ("z2", "a", "u", "z1", "alpha_n", "m_a")
+        required = ("z2", "a", "z1", "alpha_n", "m_a")
         missing = [k for k in required if num(k) is None]
         if missing:
             raise DesignError([f"Missing required input: {k}" for k in missing])
@@ -82,7 +85,6 @@ class DesignInput:
         return cls(
             z2=num("z2", int),
             a=num("a"),
-            u=num("u"),
             z1=num("z1", int),
             alpha_n=num("alpha_n"),
             m_a=num("m_a"),
@@ -224,7 +226,7 @@ def recommended_gear_teeth(a: float):
 
 def _validate(inp: DesignInput) -> list[str]:
     errors = []
-    for key in ("z2", "a", "u", "z1", "m_a"):
+    for key in ("z2", "a", "z1", "m_a"):
         if getattr(inp, key) <= 0:
             errors.append(f"'{key}' must be greater than zero")
     if not 0 < inp.alpha_n < 45:
@@ -232,11 +234,6 @@ def _validate(inp: DesignInput) -> list[str]:
     if errors:
         return errors
 
-    if abs(inp.z2 / inp.z1 - inp.u) > RATIO_TOLERANCE * inp.u:
-        errors.append(
-            f"Inconsistent inputs: eq. (1) requires z1 = z2/u, but "
-            f"z2/z1 = {inp.z2}/{inp.z1} = {inp.z2 / inp.z1:.4f} while u = {inp.u:g}"
-        )
     d_w2 = inp.m_a * inp.z2
     if d_w2 >= 2 * inp.a:
         errors.append(
@@ -358,9 +355,11 @@ def calculate(inp: DesignInput) -> dict:
         warnings.append("Effective worm thread length is not positive; check pressure angle and proportions.")
 
     geometry = Section("Basic gearset proportions (clause 4)")
-    geometry.add("z1", "Number of threads in worm", z1, "", "Eq. 1", f"z2/u = {z2 / u:.4f}")
-    geometry.add("u", "Gear ratio", u, "", "Eq. 1",
-                 "Even number system" if z2 % z1 == 0 else "Hunting tooth system")
+    geometry.add("u", "Gear ratio", u, "", "Eq. 1", f"z2/z1 = {z2}/{z1}")
+    if z2 % z1 == 0:
+        geometry.add("", "Tooth combination system", "Even number", "", "3.3", "z2 divisible by z1")
+    else:
+        geometry.add("", "Tooth combination system", "Hunting tooth", "", "3.3", "z2 not divisible by z1")
     geometry.add("d_w1,approx", "Worm pitch diameter, first approximation", d_w1_approx, "mm", "Eq. 2")
     geometry.add("m_a,rec", "Axial module implied by Eq. 2", m_a_rec, "mm", "Eqs. 2, 4, 6",
                  "For comparison with the input axial module")
