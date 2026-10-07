@@ -5,10 +5,12 @@ dashboard; results are the same sections, warnings and CSV export.
 """
 
 import csv
+import math
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from globoid import DesignError, DesignInput, calculate
+from globoid.equations import EQUATION_SECTIONS
 
 REQUIRED_FIELDS = [
     ("z2", "Number of teeth of worm wheel, z2", "30"),
@@ -128,8 +130,57 @@ class DesignerWindow:
     # ----- results --------------------------------------------------------
 
     def _build_results(self, parent: ttk.Frame) -> None:
-        right = ttk.LabelFrame(parent, text="Gearset parameters", padding=8)
-        right.grid(row=0, column=1, sticky="nsew")
+        notebook = ttk.Notebook(parent)
+        notebook.grid(row=0, column=1, sticky="nsew")
+        results_tab = ttk.Frame(notebook, padding=8)
+        equations_tab = ttk.Frame(notebook, padding=8)
+        geometry_tab = ttk.Frame(notebook, padding=8)
+        notebook.add(results_tab, text="Gearset parameters")
+        notebook.add(equations_tab, text="Equations")
+        notebook.add(geometry_tab, text="Geometry sketch")
+
+        self._build_equations(equations_tab)
+        self._build_geometry(geometry_tab)
+        self._build_result_table(results_tab)
+
+    def _build_equations(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
+        text = tk.Text(parent, wrap="word", font=("Segoe UI", 10), padx=8, pady=6, borderwidth=0)
+        scroll = ttk.Scrollbar(parent, orient="vertical", command=text.yview)
+        text.configure(yscrollcommand=scroll.set)
+        text.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+
+        text.tag_configure("section", font=("Segoe UI", 12, "bold"), spacing1=12, spacing3=4)
+        text.tag_configure("ref", font=("Segoe UI", 10, "bold"), foreground="#1f4e79", spacing1=8)
+        text.tag_configure("formula", font=("Consolas", 11), background="#f2f5f8", lmargin1=16, lmargin2=16,
+                           spacing1=2, spacing3=4)
+        text.tag_configure("term", lmargin1=24, lmargin2=44, tabs=("130", "190", "240"))
+        text.tag_configure("symbol", font=("Consolas", 10, "bold"))
+
+        for title, equations in EQUATION_SECTIONS:
+            text.insert("end", f"{title}\n", "section")
+            for eq in equations:
+                text.insert("end", f"{eq['ref']}   {eq['title']}\n", "ref")
+                text.insert("end", f"{eq['formula']}\n", "formula")
+                text.insert("end", "Where:\n")
+                for symbol, meaning, unit in eq["terms"]:
+                    text.insert("end", f"{symbol}\t{meaning}\t[{unit}]\n", "term")
+        text.configure(state="disabled")
+
+    def _build_geometry(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+        self.geometry_info = ttk.Label(parent, text="Press Calculate to draw the worm and worm wheel.",
+                                       justify="left")
+        self.geometry_info.grid(row=0, column=0, sticky="w", pady=(0, 6))
+        self.canvas = tk.Canvas(parent, background="white", highlightthickness=0)
+        self.canvas.grid(row=1, column=0, sticky="nsew")
+        self.canvas.bind("<Configure>", lambda _event: self.draw_geometry())
+
+    def _build_result_table(self, parent: ttk.Frame) -> None:
+        right = parent
         right.columnconfigure(0, weight=1)
         right.rowconfigure(1, weight=1)
 
@@ -182,6 +233,7 @@ class DesignerWindow:
                 self.messages.insert("end", f"• {error}\n", "error")
             self.messages.configure(state="disabled")
             self.messages.grid()
+            self.draw_geometry()
             return
 
         if result["warnings"]:
@@ -205,6 +257,128 @@ class DesignerWindow:
                     tags = ("bad",)
                 self.table.insert(parent, "end", text="", tags=tags, values=(
                     row["symbol"], row["name"], fmt(row["value"]), row["unit"], row["ref"], note))
+        self.draw_geometry()
+
+    # ----- geometry sketch ------------------------------------------------
+
+    def _geometry_dims(self):
+        """Dimensions needed for the sketch, taken from the last calculation."""
+        if not self.result or self.result.get("errors"):
+            return None
+        values = {"a": self.result["inputs"]["a"]}
+        for section in self.result["sections"]:
+            for row in section["rows"]:
+                if row["symbol"]:
+                    values.setdefault(row["symbol"], row["value"])
+        needed = ("d_a1", "d_w1", "d_f1", "d_a2", "d_w2", "d_f2", "b_1eff", "b_2")
+        if not all(isinstance(values.get(k), (int, float)) for k in needed):
+            return None
+        return values
+
+    def draw_geometry(self) -> None:
+        canvas = self.canvas
+        canvas.delete("all")
+        if not self.result:
+            self.geometry_info.configure(text="Press Calculate to draw the worm and worm wheel.")
+            return
+        d = self._geometry_dims()
+        if d is None:
+            self.geometry_info.configure(text="No sketch: the inputs were rejected. Fix them and press Calculate.")
+            return
+        self.geometry_info.configure(text=(
+            f"a = {d['a']:g} mm    dw1 = {d['d_w1']:.2f} mm    dw2 = {d['d_w2']:.2f} mm    "
+            f"b1eff = {d['b_1eff']:.2f} mm    b2 = {d['b_2']:.2f} mm\n"
+            "Solid: outside diameter    dashed: pitch    dotted: root    (all sketches to scale, except the worm side view which is schematic)"))
+        w, h = canvas.winfo_width(), canvas.winfo_height()
+        if w < 200 or h < 200:
+            return
+
+        a, r_w, r_g = d["a"], d["d_a1"] / 2, d["d_a2"] / 2
+
+        # View 1: centre plane, looking along the worm axis. Worm centre O1 at the origin.
+        ydim = -r_g * 1.12
+        tf, sc = self._transform((10, 10, w * 0.56, h - 10),
+                                 min(-r_w, a - r_g), max(r_w, a + r_g), -r_g * 1.25, r_g * 1.1)
+        self._caption((10, 10, w * 0.56, h - 10), "Centre plane (view along the worm axis)")
+        self._rings(tf, 0.0, 0.0, d["d_a1"], d["d_w1"], d["d_f1"], "worm", "O1", "da1")
+        self._rings(tf, a, 0.0, d["d_a2"], d["d_w2"], d["d_f2"], "wheel", "O2", "da2")
+        self._line(tf, (0.0, ydim), (a, ydim), "#333333", None, 1, arrow="both")
+        x_mid, y_txt = tf(a / 2, ydim)
+        canvas.create_text(x_mid, y_txt + 12, text=f"a = {a:g} mm", fill="#333333")
+
+        # View 2: worm side elevation (schematic). Thread length b1eff along the axis.
+        b1 = d["b_1eff"]
+        box = (w * 0.6, 10, w - 10, h / 2 - 5)
+        tf, sc = self._transform(box, -0.1 * b1, 1.45 * b1, -r_w * 1.4, r_w * 1.4)
+        self._caption(box, "Worm side view (schematic)")
+        self._band(tf, 0.0, b1, -r_w, r_w, "#e8f0f8", "#1f4e79")
+        self._line(tf, (0.0, d["d_f1"] / 2), (b1, d["d_f1"] / 2), "#666666", (2, 3), 1)
+        self._line(tf, (0.0, -d["d_f1"] / 2), (b1, -d["d_f1"] / 2), "#666666", (2, 3), 1)
+        self._line(tf, (0.0, d["d_w1"] / 2), (b1, d["d_w1"] / 2), "#b35900", (6, 4), 1)
+        self._line(tf, (0.0, -d["d_w1"] / 2), (b1, -d["d_w1"] / 2), "#b35900", (6, 4), 1)
+        self._text(tf, b1 / 2, r_w, f"da1 = {d['d_a1']:.2f}", "s")
+        self._text(tf, b1 * 1.02, 0.0, f"dw1 = {d['d_w1']:.2f}\ndf1 = {d['d_f1']:.2f}", "w")
+        self._text(tf, b1 / 2, -r_w, f"b1eff = {b1:.2f}", "n")
+
+        # View 3: wheel rim cross-section through the wheel axis (schematic, teeth not drawn).
+        b2 = d["b_2"]
+        box = (w * 0.6, h / 2 + 5, w - 10, h - 10)
+        tf, sc = self._transform(box, -1.6 * b2, 1.6 * b2, -r_g * 1.08, r_g * 1.08)
+        self._caption(box, "Wheel axial section (rim, schematic)")
+        f_top, a_top = d["d_f2"] / 2, r_g
+        self._band(tf, -b2 / 2, b2 / 2, f_top, a_top, "#e8f0f8", "#1f4e79")
+        self._band(tf, -b2 / 2, b2 / 2, -a_top, -f_top, "#e8f0f8", "#1f4e79")
+        self._line(tf, (-b2 * 0.9, 0.0), (b2 * 0.9, 0.0), "#999999", (10, 3, 2, 3), 1)
+        self._line(tf, (-b2 * 0.9, d["d_w2"] / 2), (b2 * 0.9, d["d_w2"] / 2), "#b35900", (6, 4), 1)
+        self._line(tf, (-b2 * 0.9, -d["d_w2"] / 2), (b2 * 0.9, -d["d_w2"] / 2), "#b35900", (6, 4), 1)
+        self._text(tf, b2 / 2, (a_top + f_top) / 2,
+                   f"da2 = {d['d_a2']:.2f}\ndw2 = {d['d_w2']:.2f}\ndf2 = {d['d_f2']:.2f}", "e")
+        self._text(tf, 0.0, -a_top, f"b2 = {b2:.2f}", "s")
+
+    def _transform(self, box, xmin, xmax, ymin, ymax, pad=50):
+        """Map world coordinates (mm, y up) into the canvas box, keeping the scale."""
+        x0, y0, x1, y1 = box
+        scale = min((x1 - x0 - 2 * pad) / (xmax - xmin), (y1 - y0 - 2 * pad) / (ymax - ymin))
+        ox = (x0 + x1) / 2 - scale * (xmin + xmax) / 2
+        oy = (y0 + y1) / 2 + scale * (ymin + ymax) / 2
+        return (lambda x, y: (ox + scale * x, oy - scale * y)), scale
+
+    def _caption(self, box, text) -> None:
+        self.canvas.create_text(box[0] + 6, box[1] + 4, text=text, anchor="nw",
+                                font=("Segoe UI", 10, "bold"), fill="#222222")
+
+    def _line(self, tf, p1, p2, color, dash, width, arrow=None) -> None:
+        self.canvas.create_line(*tf(*p1), *tf(*p2), fill=color, dash=dash, width=width, arrow=arrow)
+
+    def _text(self, tf, x, y, text, where) -> None:
+        """Label at a world point. `where` picks the side: n, s, e, w."""
+        px, py = tf(x, y)
+        offset = {"n": (0, -8, "s"), "s": (0, 8, "n"), "e": (8, 0, "w"), "w": (-8, 0, "e")}[where]
+        self.canvas.create_text(px + offset[0], py + offset[1], text=text, anchor=offset[2],
+                                fill="#222222", font=("Segoe UI", 9))
+
+    def _band(self, tf, x0, x1, y0, y1, fill, outline) -> None:
+        left, top = tf(x0, y1)
+        right, bottom = tf(x1, y0)
+        self.canvas.create_rectangle(left, top, right, bottom, fill=fill, outline=outline, width=2)
+
+    def _rings(self, tf, cx, cy, d_out, d_pitch, d_root, name, centre, out_label) -> None:
+        """Concentric outside, pitch and root circles with a centre mark."""
+        for diameter, dash, color, width in ((d_out, None, "#1f4e79", 2),
+                                             (d_pitch, (6, 4), "#b35900", 1),
+                                             (d_root, (2, 3), "#666666", 1)):
+            r = diameter / 2
+            x0, y0 = tf(cx - r, cy + r)
+            x1, y1 = tf(cx + r, cy - r)
+            self.canvas.create_oval(x0, y0, x1, y1, outline=color, dash=dash, width=width)
+        px, py = tf(cx, cy)
+        self.canvas.create_line(px - 5, py, px + 5, py, fill="#333333")
+        self.canvas.create_line(px, py - 5, px, py + 5, fill="#333333")
+        self.canvas.create_text(px + 8, py + 8, text=centre, anchor="nw", fill="#333333", font=("Segoe UI", 9))
+        self.canvas.create_text(*tf(cx, cy + d_out / 2), text=f"{out_label} = {d_out:.2f}",
+                                anchor="s", fill="#1f4e79", font=("Segoe UI", 9))
+        self.canvas.create_text(*tf(cx, cy - d_root / 2), text=name, anchor="n",
+                                fill="#222222", font=("Segoe UI", 9, "bold"))
 
     # ----- actions --------------------------------------------------------
 
