@@ -18,10 +18,12 @@ double-click it. Pushing a tag such as `v1.0` also publishes them on the
 * `Start Worm Gear Designer.bat` on Windows
 * `Start Worm Gear Designer.command` on macOS or Linux
 
-Either way, a small console window opens and the dashboard appears in your
-default browser. Keep that window open while you work; close it to quit.
+The calculator opens in its own desktop window (Tkinter, included with
+Python). Close the window to quit.
 
-From a terminal: `python app.py` (options: `--port`, `--no-browser`).
+From a terminal: `python app.py` opens the desktop window. To use the
+browser dashboard instead, run `python app.py --web` (options: `--port`,
+`--no-browser`).
 Tests: `python -m unittest discover -s tests`.
 
 To build the executable yourself: `pip install pyinstaller`, then
@@ -96,7 +98,10 @@ warnings. Inconsistent or impossible inputs are rejected with a message.
 ## Layout
 
 ```
-app.py                  HTTP server + JSON API (POST /api/calculate), opens the browser
+app.py                  Entry point: desktop window (default) or --web browser dashboard
+gui.py                  Desktop window (Tkinter)
+static/index.html       Browser user interface (--web)
+app.py --web            HTTP server + JSON API (POST /api/calculate)
 build_app.py            Builds the standalone executable (PyInstaller)
 Start Worm Gear Designer.bat / .command   Double-click launchers
 .github/workflows/      Builds Windows/macOS/Linux executables on every push

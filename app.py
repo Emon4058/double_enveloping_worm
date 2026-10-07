@@ -1,7 +1,9 @@
-"""Web UI for the globoidal worm gearset calculator.
+"""Globoidal worm gearset calculator.
 
-Run:  python app.py [--port 8000] [--no-browser]
-The dashboard opens in the default browser. Uses only the Python standard library.
+Run:  python app.py              opens the desktop window (Tkinter)
+      python app.py --web        runs the dashboard in the default browser instead
+      python app.py --web [--port 8000] [--no-browser]
+Uses only the Python standard library.
 """
 
 import argparse
@@ -66,11 +68,16 @@ def make_server(host: str, port: int) -> ThreadingHTTPServer:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--web", action="store_true", help="run the dashboard in a browser instead of the desktop window")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--no-browser", action="store_true", help="do not open a browser")
+    parser.add_argument("--no-browser", action="store_true", help="with --web, do not open a browser")
     args = parser.parse_args()
+    if not args.web:
+        from gui import run as run_window
+        run_window()
+        return
     server = make_server(args.host, args.port)
     url = f"http://{args.host}:{server.server_address[1]}/"
     print("Double-Enveloping Worm Gearset Designer", flush=True)
