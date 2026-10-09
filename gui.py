@@ -9,7 +9,7 @@ import math
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from globoid import DesignError, DesignInput, calculate
+from globoid import DesignError, DesignInput, calculate, write_worm_wheel_dxf
 from globoid.equations import EQUATION_SECTIONS
 
 REQUIRED_FIELDS = [
@@ -118,6 +118,8 @@ class DesignerWindow:
         ttk.Button(buttons, text="Calculate", command=self.calculate_clicked).pack(side="left")
         self.csv_button = ttk.Button(buttons, text="Export CSV", command=self.export_csv, state="disabled")
         self.csv_button.pack(side="left", padx=(8, 0))
+        self.dxf_button = ttk.Button(buttons, text="Export wheel DXF", command=self.export_dxf, state="disabled")
+        self.dxf_button.pack(side="left", padx=(8, 0))
 
         self.root.bind("<Return>", lambda _event: self.calculate_clicked())
 
@@ -270,7 +272,7 @@ class DesignerWindow:
             for row in section["rows"]:
                 if row["symbol"]:
                     values.setdefault(row["symbol"], row["value"])
-        needed = ("d_a1", "d_w1", "d_f1", "d_a2", "d_w2", "d_f2", "b_1eff", "b_2")
+        needed = ("d_a1", "d_w1", "d_f1", "d_a2", "d_w2", "d_f2", "b_1eff", "b_2", "delta_m1")
         if not all(isinstance(values.get(k), (int, float)) for k in needed):
             return None
         return values
@@ -285,55 +287,142 @@ class DesignerWindow:
         if d is None:
             self.geometry_info.configure(text="No sketch: the inputs were rejected. Fix them and press Calculate.")
             return
+
+        a, b1, b2 = d["a"], d["b_1eff"], d["b_2"]
+        # Envelope (end) diameters: the globoid arcs swell away from the throat.
+        d_e1 = 2 * self._globoid_radius(a, d["d_a1"] / 2, b1 / 2)
+        d_e2 = 2 * self._globoid_radius(a, d["d_a2"] / 2, b2 / 2)
+
         self.geometry_info.configure(text=(
-            f"a = {d['a']:g} mm    dw1 = {d['d_w1']:.2f} mm    dw2 = {d['d_w2']:.2f} mm    "
-            f"b1eff = {d['b_1eff']:.2f} mm    b2 = {d['b_2']:.2f} mm\n"
-            "Solid: outside diameter    dashed: pitch    dotted: root    (all sketches to scale, except the worm side view which is schematic)"))
+            f"a = {a:g} mm    dw1 = {d['d_w1']:.2f} mm    dw2 = {d['d_w2']:.2f} mm    "
+            f"b1eff = {b1:.2f} mm    b2 = {b2:.2f} mm    de1 = {d_e1:.2f} mm    de2 = {d_e2:.2f} mm\n"
+            "Double-enveloping (globoidal) set: the worm is hourglass-shaped and the gear rim is throated. "
+            "In the axial section every surface is a circular arc struck from the mating member's axis, "
+            "radius R = a - d/2 (clause 4, eqs. 24-26).\n"
+            "The central plane (fig. 2) contains the worm axis and the line of centres: the gear is seen "
+            "along its own axis as circles, the worm in elevation as the hourglass.\n"
+            "Solid: throat / addendum    dashed: pitch    dotted: root    "
+            "dash-dot: envelope (end) diameter and axes    all views to scale"))
+
         w, h = canvas.winfo_width(), canvas.winfo_height()
         if w < 200 or h < 200:
             return
 
-        a, r_w, r_g = d["a"], d["d_a1"] / 2, d["d_a2"] / 2
+        r_e1, r_e2 = d_e1 / 2, d_e2 / 2
 
-        # View 1: centre plane, looking along the worm axis. Worm centre O1 at the origin.
-        ydim = -r_g * 1.12
-        tf, sc = self._transform((10, 10, w * 0.56, h - 10),
-                                 min(-r_w, a - r_g), max(r_w, a + r_g), -r_g * 1.25, r_g * 1.1)
-        self._caption((10, 10, w * 0.56, h - 10), "Centre plane (view along the worm axis)")
-        self._rings(tf, 0.0, 0.0, d["d_a1"], d["d_w1"], d["d_f1"], "worm", "O1", "da1")
-        self._rings(tf, a, 0.0, d["d_a2"], d["d_w2"], d["d_f2"], "wheel", "O2", "da2")
-        self._line(tf, (0.0, ydim), (a, ydim), "#333333", None, 1, arrow="both")
-        x_mid, y_txt = tf(a / 2, ydim)
-        canvas.create_text(x_mid, y_txt + 12, text=f"a = {a:g} mm", fill="#333333")
+        # View 1: central plane (figure 2 of the standard). The central plane contains the
+        # worm axis and the line of centres and is perpendicular to the gear axis, so the
+        # gear is seen along its own axis as circles and the worm is seen in elevation as
+        # the hourglass. Worm centre O1 at the origin, gear centre O2 one centre distance
+        # away along the line of centres.
+        box = (10, 10, w * 0.56, h - 10)
+        r_g2 = d["d_a2"] / 2
+        half_span = max(r_g2, 0.62 * b1)
+        tf, _ = self._transform(box, -half_span, half_span, -r_e1 * 1.9, a + r_g2 * 1.12)
+        self._caption(box, "Central plane (contains the worm axis and the line of centres)")
+        # Line of centres and the worm axis.
+        self._line(tf, (0.0, -r_e1 * 1.5), (0.0, a + r_g2 * 1.06), "#999999", (10, 3, 2, 3), 1)
+        self._line(tf, (-half_span, 0.0), (half_span, 0.0), "#999999", (10, 3, 2, 3), 1)
+        # Gear: circles about O2. The gear outside diameter is at the gear faces, out of
+        # this plane, so figure 2 does not show it here.
+        self._rings(tf, 0.0, a, d["d_a2"], d["d_w2"], d["d_f2"], "gear", "O2", "da2")
+        d_b = d.get("d_b")
+        if isinstance(d_b, (int, float)) and d_b > 0:
+            self._circle(tf, 0.0, a, d_b, "#555555", None, 1)
+            self._text(tf, 0.0, a + d_b / 2, f"base circle db = {d_b:.2f}", "n")
+        # Worm: hourglass elevation about O1, meshing into the gear rim.
+        self._globoid_body(tf, a, b1, d["d_f1"] / 2, d["d_a1"] / 2, "#e8f0f8", "#1f4e79")
+        self._globoid_curve(tf, a, b1, d["d_w1"] / 2, "#b35900", (6, 4), 1)
+        self._globoid_curve(tf, a, b1, d["d_f1"] / 2, "#666666", (2, 3), 1)
+        self._text(tf, -b1 / 2, -r_e1, "worm", "s")
+        # Centre distance along the line of centres, and half the thread length from it.
+        xdim = -half_span
+        self._line(tf, (xdim, 0.0), (xdim, a), "#333333", None, 1, arrow="both")
+        px, py = tf(xdim, a / 2)
+        # Turned to read along the dimension line, as on a drawing, so it stays inside the view.
+        canvas.create_text(px - 10, py, text=f"a = {a:g} mm", angle=90, fill="#333333")
+        ydim = -r_e1 * 1.55
+        self._line(tf, (0.0, ydim), (b1 / 2, ydim), "#333333", None, 1, arrow="both")
+        px, py = tf(b1 / 4, ydim)
+        canvas.create_text(px, py + 10, text=f"b1eff/2 = {b1 / 2:.2f}", fill="#333333")
 
-        # View 2: worm side elevation (schematic). Thread length b1eff along the axis.
-        b1 = d["b_1eff"]
+        # View 2: worm axial section. Hourglass body: outside, pitch and root are globoid
+        # arcs struck from the gear axis, so the worm necks down to the throat at the
+        # central plane and swells to de1 at both ends of the thread length.
         box = (w * 0.6, 10, w - 10, h / 2 - 5)
-        tf, sc = self._transform(box, -0.1 * b1, 1.45 * b1, -r_w * 1.4, r_w * 1.4)
-        self._caption(box, "Worm side view (schematic)")
-        self._band(tf, 0.0, b1, -r_w, r_w, "#e8f0f8", "#1f4e79")
-        self._line(tf, (0.0, d["d_f1"] / 2), (b1, d["d_f1"] / 2), "#666666", (2, 3), 1)
-        self._line(tf, (0.0, -d["d_f1"] / 2), (b1, -d["d_f1"] / 2), "#666666", (2, 3), 1)
-        self._line(tf, (0.0, d["d_w1"] / 2), (b1, d["d_w1"] / 2), "#b35900", (6, 4), 1)
-        self._line(tf, (0.0, -d["d_w1"] / 2), (b1, -d["d_w1"] / 2), "#b35900", (6, 4), 1)
-        self._text(tf, b1 / 2, r_w, f"da1 = {d['d_a1']:.2f}", "s")
-        self._text(tf, b1 * 1.02, 0.0, f"dw1 = {d['d_w1']:.2f}\ndf1 = {d['d_f1']:.2f}", "w")
-        self._text(tf, b1 / 2, -r_w, f"b1eff = {b1:.2f}", "n")
+        tf, _ = self._transform(box, -0.95 * b1, 0.95 * b1, -r_e1 * 1.3, r_e1 * 1.3)
+        self._caption(box, "Worm axial section (globoid, hourglass)")
+        self._globoid_body(tf, a, b1, d["d_f1"] / 2, d["d_a1"] / 2, "#e8f0f8", "#1f4e79")
+        self._globoid_curve(tf, a, b1, d["d_w1"] / 2, "#b35900", (6, 4), 1)
+        self._globoid_curve(tf, a, b1, d["d_f1"] / 2, "#666666", (2, 3), 1)
+        self._line(tf, (-b1 * 0.92, 0.0), (b1 * 0.92, 0.0), "#999999", (10, 3, 2, 3), 1)
+        self._text(tf, 0.0, d["d_a1"] / 2, f"da1 = {d['d_a1']:.2f}", "s")
+        self._text(tf, 0.0, -d["d_a1"] / 2, f"dw1 = {d['d_w1']:.2f}   df1 = {d['d_f1']:.2f}", "n")
+        self._text(tf, b1 / 2, r_e1, f"de1 = {d_e1:.2f}", "e")
+        self._text(tf, -b1 / 2, -r_e1, f"b1eff = {b1:.2f}", "s")
+        self._text(tf, b1 * 0.9, 0.0, f"arcs from O2\nR = {a - d['d_a1'] / 2:.2f}", "w")
 
-        # View 3: wheel rim cross-section through the wheel axis (schematic, teeth not drawn).
-        b2 = d["b_2"]
+        # View 3: gear axial section through the gear axis. The rim is throated: tip and
+        # root surfaces are globoid arcs struck from the worm axis, wrapping round the worm.
         box = (w * 0.6, h / 2 + 5, w - 10, h - 10)
-        tf, sc = self._transform(box, -1.6 * b2, 1.6 * b2, -r_g * 1.08, r_g * 1.08)
-        self._caption(box, "Wheel axial section (rim, schematic)")
-        f_top, a_top = d["d_f2"] / 2, r_g
-        self._band(tf, -b2 / 2, b2 / 2, f_top, a_top, "#e8f0f8", "#1f4e79")
-        self._band(tf, -b2 / 2, b2 / 2, -a_top, -f_top, "#e8f0f8", "#1f4e79")
-        self._line(tf, (-b2 * 0.9, 0.0), (b2 * 0.9, 0.0), "#999999", (10, 3, 2, 3), 1)
-        self._line(tf, (-b2 * 0.9, d["d_w2"] / 2), (b2 * 0.9, d["d_w2"] / 2), "#b35900", (6, 4), 1)
-        self._line(tf, (-b2 * 0.9, -d["d_w2"] / 2), (b2 * 0.9, -d["d_w2"] / 2), "#b35900", (6, 4), 1)
-        self._text(tf, b2 / 2, (a_top + f_top) / 2,
-                   f"da2 = {d['d_a2']:.2f}\ndw2 = {d['d_w2']:.2f}\ndf2 = {d['d_f2']:.2f}", "e")
-        self._text(tf, 0.0, -a_top, f"b2 = {b2:.2f}", "s")
+        tf, _ = self._transform(box, -1.5 * b2, 1.5 * b2, -r_e2 * 1.08, r_e2 * 1.08)
+        self._caption(box, "Gear axial section (throated rim)")
+        self._globoid_body(tf, a, b2, d["d_f2"] / 2, d["d_a2"] / 2, "#e8f0f8", "#1f4e79")
+        self._globoid_curve(tf, a, b2, d["d_w2"] / 2, "#b35900", (6, 4), 1)
+        self._globoid_curve(tf, a, b2, d["d_f2"] / 2, "#666666", (2, 3), 1)
+        self._line(tf, (-b2 * 0.95, 0.0), (b2 * 0.95, 0.0), "#999999", (10, 3, 2, 3), 1)
+        # The rim diameters are close together, so they are listed beside the view
+        # rather than written on the arcs they belong to.
+        self._text(tf, b2 * 1.2, 0.0,
+                   f"da2 = {d['d_a2']:.2f} (throat)\nde2 = {d_e2:.2f} (faces)\n"
+                   f"dw2 = {d['d_w2']:.2f}\ndf2 = {d['d_f2']:.2f}", "e")
+        self._text(tf, 0.0, -d["d_a2"] / 2, f"b2 = {b2:.2f}", "s")
+
+    # ----- globoid (double-enveloping) profiles ---------------------------
+
+    @staticmethod
+    def _globoid_radius(a, r_throat, axial):
+        """Radius of a globoid surface at distance `axial` from the central plane.
+
+        In a double-enveloping set each member is swept by the mating member, so
+        in the axial section every surface is a circular arc of radius
+        R = a - r_throat struck from the mating member's axis. The radius of the
+        member therefore grows from r_throat at the central plane outwards, which
+        is what makes the worm an hourglass and the gear rim throated.
+        """
+        big_r = abs(a - r_throat)
+        axial = min(abs(axial), 0.995 * big_r)
+        return a - math.sqrt(big_r * big_r - axial * axial)
+
+    def _globoid_points(self, a, length, r_throat, segments=72):
+        """Polyline of (axial, radius) along one globoid flank, centred on the throat.
+
+        The half length is capped just inside the generating radius: past that
+        the arc has turned through 90 deg and no longer describes a surface, so
+        a face width wider than the arc is drawn only as far as the arc reaches.
+        """
+        half = min(length / 2.0, 0.995 * abs(a - r_throat))
+        xs = [-half + 2 * half * i / segments for i in range(segments + 1)]
+        return [(x, self._globoid_radius(a, r_throat, x)) for x in xs]
+
+    def _globoid_curve(self, tf, a, length, r_throat, color, dash, width) -> None:
+        """One globoid arc and its mirror image on the far side of the axis."""
+        points = self._globoid_points(a, length, r_throat)
+        for sign in (1.0, -1.0):
+            flat = [coord for x, r in points for coord in tf(x, sign * r)]
+            self.canvas.create_line(*flat, fill=color, dash=dash, width=width)
+
+    def _globoid_body(self, tf, a, length, r_inner, r_outer, fill, outline) -> None:
+        """Hourglass / throated body between two globoid arcs, both sides of the axis."""
+        # Both arcs are drawn over the same (possibly capped) length, so the end
+        # faces of the body stay square.
+        length = min(length, 2 * 0.995 * abs(a - r_inner), 2 * 0.995 * abs(a - r_outer))
+        inner = self._globoid_points(a, length, r_inner)
+        outer = self._globoid_points(a, length, r_outer)
+        for sign in (1.0, -1.0):
+            ring = [(x, sign * r) for x, r in outer] + [(x, sign * r) for x, r in reversed(inner)]
+            flat = [coord for x, r in ring for coord in tf(x, r)]
+            self.canvas.create_polygon(flat, fill=fill, outline=outline, width=2)
 
     def _transform(self, box, xmin, xmax, ymin, ymax, pad=50):
         """Map world coordinates (mm, y up) into the canvas box, keeping the scale."""
@@ -350,6 +439,12 @@ class DesignerWindow:
     def _line(self, tf, p1, p2, color, dash, width, arrow=None) -> None:
         self.canvas.create_line(*tf(*p1), *tf(*p2), fill=color, dash=dash, width=width, arrow=arrow)
 
+    def _circle(self, tf, cx, cy, diameter, color, dash, width) -> None:
+        r = diameter / 2
+        x0, y0 = tf(cx - r, cy + r)
+        x1, y1 = tf(cx + r, cy - r)
+        self.canvas.create_oval(x0, y0, x1, y1, outline=color, dash=dash, width=width)
+
     def _text(self, tf, x, y, text, where) -> None:
         """Label at a world point. `where` picks the side: n, s, e, w."""
         px, py = tf(x, y)
@@ -357,27 +452,32 @@ class DesignerWindow:
         self.canvas.create_text(px + offset[0], py + offset[1], text=text, anchor=offset[2],
                                 fill="#222222", font=("Segoe UI", 9))
 
-    def _band(self, tf, x0, x1, y0, y1, fill, outline) -> None:
-        left, top = tf(x0, y1)
-        right, bottom = tf(x1, y0)
-        self.canvas.create_rectangle(left, top, right, bottom, fill=fill, outline=outline, width=2)
+    def _rings(self, tf, cx, cy, d_out, d_pitch, d_root, name, centre, out_label,
+               d_env=None, env_label=None) -> None:
+        """Addendum, pitch, root and envelope circles with a centre mark.
 
-    def _rings(self, tf, cx, cy, d_out, d_pitch, d_root, name, centre, out_label) -> None:
-        """Concentric outside, pitch and root circles with a centre mark."""
-        for diameter, dash, color, width in ((d_out, None, "#1f4e79", 2),
-                                             (d_pitch, (6, 4), "#b35900", 1),
-                                             (d_root, (2, 3), "#666666", 1)):
-            r = diameter / 2
-            x0, y0 = tf(cx - r, cy + r)
-            x1, y1 = tf(cx + r, cy - r)
-            self.canvas.create_oval(x0, y0, x1, y1, outline=color, dash=dash, width=width)
+        Seen along its own axis a globoid member is round: the solid circle is
+        the throat diameter in the central plane and the dash-dot circle is the
+        envelope diameter reached at the ends of the thread length / face width.
+        """
+        circles = [(d_out, None, "#1f4e79", 2),
+                   (d_pitch, (6, 4), "#b35900", 1),
+                   (d_root, (2, 3), "#666666", 1)]
+        if d_env is not None:
+            circles.append((d_env, (10, 3, 2, 3), "#1f4e79", 1))
+        for diameter, dash, color, width in circles:
+            self._circle(tf, cx, cy, diameter, color, dash, width)
         px, py = tf(cx, cy)
         self.canvas.create_line(px - 5, py, px + 5, py, fill="#333333")
         self.canvas.create_line(px, py - 5, px, py + 5, fill="#333333")
         self.canvas.create_text(px + 8, py + 8, text=centre, anchor="nw", fill="#333333", font=("Segoe UI", 9))
         self.canvas.create_text(*tf(cx, cy + d_out / 2), text=f"{out_label} = {d_out:.2f}",
                                 anchor="s", fill="#1f4e79", font=("Segoe UI", 9))
-        self.canvas.create_text(*tf(cx, cy - d_root / 2), text=name, anchor="n",
+        if d_env is not None and env_label:
+            self.canvas.create_text(*tf(cx, cy + d_env / 2), text=f"{env_label} = {d_env:.2f}",
+                                    anchor="s", fill="#1f4e79", font=("Segoe UI", 9))
+        # The member name goes beside the root circle, clear of the mesh.
+        self.canvas.create_text(*tf(cx - d_root / 2, cy), text=name, anchor="w",
                                 fill="#222222", font=("Segoe UI", 9, "bold"))
 
     # ----- actions --------------------------------------------------------
@@ -413,6 +513,7 @@ class DesignerWindow:
         except DesignError as exc:
             self.result = {"errors": exc.errors, "warnings": [], "sections": []}
         self.csv_button.configure(state="disabled" if self.result.get("errors") else "normal")
+        self.dxf_button.configure(state="normal" if self._geometry_dims() else "disabled")
         self.render(self.result)
 
     def export_csv(self) -> None:
@@ -435,6 +536,20 @@ class DesignerWindow:
                     writer.writerow(["Warning", "", warning])
         except OSError as exc:
             messagebox.showerror("Export CSV", f"Could not save the file:\n{exc}", parent=self.root)
+
+    def export_dxf(self) -> None:
+        dims = self._geometry_dims()
+        if dims is None:
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self.root, defaultextension=".dxf", initialfile="worm_wheel.dxf",
+            filetypes=[("DXF files", "*.dxf")])
+        if not path:
+            return
+        try:
+            write_worm_wheel_dxf(path, dims)
+        except OSError as exc:
+            messagebox.showerror("Export DXF", f"Could not save the file:\n{exc}", parent=self.root)
 
 
 def run() -> None:
