@@ -272,7 +272,7 @@ class DesignerWindow:
         """Dimensions needed for the sketch, taken from the last calculation."""
         if not self.result or self.result.get("errors"):
             return None
-        values = {"a": self.result["inputs"]["a"]}
+        values = {"a": self.result["inputs"]["a"], "z2": self.result["inputs"]["z2"]}
         for section in self.result["sections"]:
             for row in section["rows"]:
                 if row["symbol"]:
@@ -306,7 +306,11 @@ class DesignerWindow:
             "radius R = a - d/2 (clause 4, eqs. 24-26).\n"
             "The central plane (fig. 2) contains the worm axis and the line of centres: the gear is seen "
             "along its own axis as circles, the worm in elevation as the hourglass.\n"
-            "Solid: throat / addendum    dashed: pitch    dotted: root    "
+            f"The gear is drawn with its {int(d['z2'])} teeth: in the central plane the "
+            "straight-sided worm thread acts as a rack, so the tooth profile there is an "
+            "involute of rb = (dw2/2) cos ax, smx2 thick on the pitch circle, from df2 to da2. "
+            "A tooth space is centred on the line of centres, where the worm meshes.\n"
+            "Solid: throat / addendum and tooth flanks    dashed: pitch    dotted: root    "
             "dash-dot: envelope (end) diameter and axes    all views to scale"))
 
         w, h = canvas.winfo_width(), canvas.winfo_height()
@@ -328,9 +332,15 @@ class DesignerWindow:
         # Line of centres and the worm axis.
         self._line(tf, (0.0, -r_e1 * 1.5), (0.0, a + r_g2 * 1.06), "#999999", (10, 3, 2, 3), 1)
         self._line(tf, (-half_span, 0.0), (half_span, 0.0), "#999999", (10, 3, 2, 3), 1)
-        # Gear: circles about O2. The gear outside diameter is at the gear faces, out of
-        # this plane, so figure 2 does not show it here.
-        self._rings(tf, 0.0, a, d["d_a2"], d["d_w2"], d["d_f2"], "gear", "O2", "da2")
+        # Gear: teeth and circles about O2. The gear outside diameter is at the gear
+        # faces, out of this plane, so figure 2 does not show it here.
+        teeth = self._draw_teeth(tf, 0.0, a, d)
+        self._rings(tf, 0.0, a, d["d_a2"], d["d_w2"], d["d_f2"], "gear", "O2", "da2",
+                    draw_out=not teeth)
+        if teeth:
+            # Beside the rim, clear of the da2 and db labels on the centre line.
+            self._text(tf, d["d_a2"] / 2, a,
+                       f"z2 = {int(d['z2'])} teeth\nsmx2 = {d['s_mx2']:.2f} on dw2", "e")
         d_b = d.get("d_b")
         if isinstance(d_b, (int, float)) and d_b > 0:
             self._circle(tf, 0.0, a, d_b, "#555555", None, 1)
@@ -382,6 +392,95 @@ class DesignerWindow:
                    f"da2 = {d['d_a2']:.2f} (throat)\nde2 = {d_e2:.2f} (faces)\n"
                    f"dw2 = {d['d_w2']:.2f}\ndf2 = {d['d_f2']:.2f}", "e")
         self._text(tf, 0.0, -d["d_a2"] / 2, f"b2 = {b2:.2f}", "s")
+
+    # ----- worm wheel teeth ----------------------------------------------
+
+    @staticmethod
+    def _involute_offset(r_b, r, half_angle, inv_alpha):
+        """Angle from a tooth centre line to its flank at radius r.
+
+        In the central plane the straight-sided worm thread acts as a rack, so
+        the gear tooth profile there is an involute of the base circle
+        rb = (dw2/2) cos(alpha_x). The offset is half_angle at the pitch circle
+        and closes in towards the tip. Inside the base circle the flank is
+        drawn radially, which is the constant the formula returns there.
+        """
+        if r <= r_b:
+            return half_angle + inv_alpha
+        alpha_r = math.acos(min(1.0, r_b / r))
+        return half_angle + inv_alpha - (math.tan(alpha_r) - alpha_r)
+
+    def _tooth_outline(self, z, d_pitch, d_tip, d_root, s_pitch, alpha_deg, phase,
+                       flank_steps=9, arc_steps=4):
+        """Polar points (r, theta) tracing every tooth of the gear, once round.
+
+        Tooth count, thickness and the tip and root diameters are the
+        calculated ones, so the teeth drawn are the teeth of the result table:
+        z2 of them, s_mx2 thick on the pitch circle, running from df2 to da2.
+        """
+        r_p, r_a, r_f = d_pitch / 2.0, d_tip / 2.0, d_root / 2.0
+        alpha = math.radians(alpha_deg)
+        r_b = r_p * math.cos(alpha)
+        inv_alpha = math.tan(alpha) - alpha
+        half_angle = s_pitch / d_pitch  # half the tooth arc at the pitch circle
+
+        def offset(r):
+            return self._involute_offset(r_b, r, half_angle, inv_alpha)
+
+        r_lo = max(r_f, r_b)
+        r_hi = max(r_lo, r_a)
+        if offset(r_lo) <= 0:
+            return []
+        # A tooth that comes to a point below the throat diameter is drawn only
+        # as far as the two flanks meet.
+        if offset(r_hi) <= 0:
+            lo, hi = r_lo, r_hi
+            for _ in range(40):
+                mid = (lo + hi) / 2.0
+                lo, hi = (mid, hi) if offset(mid) > 0 else (lo, mid)
+            r_hi = lo
+
+        pitch_angle = 2 * math.pi / z
+        radii = [r_lo + (r_hi - r_lo) * i / flank_steps for i in range(flank_steps + 1)]
+        if r_f < r_lo:
+            radii.insert(0, r_f)
+
+        points = []
+        for k in range(z):
+            centre = phase + k * pitch_angle
+            for r in radii:  # up the trailing flank
+                points.append((r, centre - offset(r)))
+            top = offset(r_hi)
+            if top > 1e-6:  # across the tip
+                for i in range(1, arc_steps):
+                    points.append((r_hi, centre - top + 2 * top * i / arc_steps))
+            for r in reversed(radii):  # down the leading flank
+                points.append((r, centre + offset(r)))
+            start = centre + offset(r_f)  # root arc across to the next tooth
+            end = centre + pitch_angle - offset(r_f)
+            for i in range(1, arc_steps + 1):
+                points.append((r_f, start + (end - start) * i / arc_steps))
+        return points
+
+    def _draw_teeth(self, tf, cx, cy, d, color="#1f4e79", width=1) -> bool:
+        """Draw the worm wheel teeth about (cx, cy). False if they are unknown."""
+        z, s_pitch, alpha = d.get("z2"), d.get("s_mx2"), d.get("alpha_x")
+        if not all(isinstance(v, (int, float)) for v in (z, s_pitch, alpha)):
+            return False
+        if z < 3 or s_pitch <= 0 or d["d_f2"] <= 0:
+            return False
+        # A tooth space is centred on the line of centres, where the worm
+        # thread meshes; the gear centre sits one centre distance above O1.
+        phase = -math.pi / 2 + math.pi / z
+        points = self._tooth_outline(int(z), d["d_w2"], d["d_a2"], d["d_f2"],
+                                     s_pitch, alpha, phase)
+        if len(points) < 4:
+            return False
+        flat = []
+        for r, theta in points + points[:1]:
+            flat.extend(tf(cx + r * math.cos(theta), cy + r * math.sin(theta)))
+        self.canvas.create_line(*flat, fill=color, width=width)
+        return True
 
     # ----- globoid (double-enveloping) profiles ---------------------------
 
@@ -458,16 +557,19 @@ class DesignerWindow:
                                 fill="#222222", font=("Segoe UI", 9))
 
     def _rings(self, tf, cx, cy, d_out, d_pitch, d_root, name, centre, out_label,
-               d_env=None, env_label=None) -> None:
+               d_env=None, env_label=None, draw_out=True) -> None:
         """Addendum, pitch, root and envelope circles with a centre mark.
 
         Seen along its own axis a globoid member is round: the solid circle is
         the throat diameter in the central plane and the dash-dot circle is the
         envelope diameter reached at the ends of the thread length / face width.
         """
-        circles = [(d_out, None, "#1f4e79", 2),
-                   (d_pitch, (6, 4), "#b35900", 1),
+        # With the teeth drawn, the tooth tips are the outside circle, so a full
+        # circle through the tooth spaces is left out (draw_out=False).
+        circles = [(d_pitch, (6, 4), "#b35900", 1),
                    (d_root, (2, 3), "#666666", 1)]
+        if draw_out:
+            circles.insert(0, (d_out, None, "#1f4e79", 2))
         if d_env is not None:
             circles.append((d_env, (10, 3, 2, 3), "#1f4e79", 1))
         for diameter, dash, color, width in circles:
