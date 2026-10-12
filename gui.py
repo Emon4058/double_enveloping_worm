@@ -5,15 +5,18 @@ dashboard; results are the same sections, warnings, CSV, DXF and SolidWorks
 equation exports.
 """
 
-import csv
-import math
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+import csv                                  # writes the result table as a spreadsheet file
+import math                                 # trigonometry for the geometry sketch
+import tkinter as tk                        # the base GUI toolkit (window, canvas, text)
+from tkinter import filedialog, messagebox, ttk   # save dialogs, error popups, themed widgets
 
+# The calculation package: same entry points the web API uses.
 from globoid import (DesignError, DesignInput, calculate, write_equations_txt,
                      write_worm_wheel_dxf)
-from globoid.equations import EQUATION_SECTIONS
+from globoid.equations import EQUATION_SECTIONS   # reference text shown on the Equations tab
 
+# The five inputs that fix the geometry. Tuple layout: (field name, label, default text).
+# The field names match DesignInput.from_dict, so the form can be submitted as-is.
 REQUIRED_FIELDS = [
     ("z2", "Number of teeth of worm wheel, z2", "30"),
     ("z1", "Number of starts of worm, z1", "1"),
@@ -22,6 +25,8 @@ REQUIRED_FIELDS = [
     ("m_a", "Axial module, ma [mm]", "5.48"),
 ]
 
+# Rating, force and strength inputs. A blank default means "leave it out":
+# the calculator then estimates the value or skips that part of the design.
 OPTIONAL_FIELDS = [
     ("n1", "Worm speed, n1 [rpm]", "1750"),
     ("backlash", "Backlash on gear pitch circle, jx [mm]", "0"),
@@ -37,17 +42,18 @@ OPTIONAL_FIELDS = [
     ("youngs_modulus", "Worm modulus of elasticity [N/mm²]", "206850"),
 ]
 
-LOAD_TYPES = ["uniform", "moderate", "heavy", "extreme"]
-COLUMNS = ("symbol", "parameter", "value", "unit", "ref", "note")
-HEADINGS = ("Symbol", "Parameter", "Value", "Unit", "Ref.", "Note")
+LOAD_TYPES = ["uniform", "moderate", "heavy", "extreme"]          # table D.1 load characters
+COLUMNS = ("symbol", "parameter", "value", "unit", "ref", "note")  # Treeview column ids
+HEADINGS = ("Symbol", "Parameter", "Value", "Unit", "Ref.", "Note")  # their visible headings
 
 
 def fmt(value) -> str:
     """Format a result value the same way as the web dashboard."""
     if not isinstance(value, float):
-        return str(value)
+        return str(value)                 # ints and text rows are shown unchanged
     if value.is_integer():
-        return str(int(value))
+        return str(int(value))            # 30.0 -> "30"
+    # Fewer decimals on large numbers, more on small ones, so the column stays readable.
     magnitude = abs(value)
     if magnitude >= 1000:
         return f"{value:.1f}"
@@ -57,6 +63,7 @@ def fmt(value) -> str:
 
 
 def parse_float(text: str):
+    """float(text), or None if the box is empty or holds something else."""
     try:
         return float(text)
     except ValueError:
@@ -64,29 +71,33 @@ def parse_float(text: str):
 
 
 class DesignerWindow:
+    """The whole application window: input panel on the left, tabbed results on the right."""
+
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.result = None
-        self.vars: dict[str, tk.StringVar] = {}
+        self.result = None                          # the last calculation, or None before the first
+        self.vars: dict[str, tk.StringVar] = {}     # field name -> the entry's text variable
         root.title("Double-Enveloping Worm Gearset Designer")
-        root.geometry("1280x800")
-        root.minsize(980, 620)
+        root.geometry("1280x800")                   # initial size
+        root.minsize(980, 620)                      # below this the layout stops fitting
 
         main = ttk.Frame(root, padding=10)
         main.pack(fill="both", expand=True)
-        main.columnconfigure(1, weight=1)
-        main.rowconfigure(0, weight=1)
+        main.columnconfigure(1, weight=1)   # column 1 (the results) takes the extra width
+        main.rowconfigure(0, weight=1)      # and the extra height
 
         self._build_inputs(main)
         self._build_results(main)
 
+        # Recompute the live hints whenever one of these three boxes is edited.
         for name in ("z2", "z1", "a"):
             self.vars[name].trace_add("write", lambda *_: self.update_hints())
-        self.update_hints()
+        self.update_hints()                 # show the hints for the default values
 
     # ----- inputs ---------------------------------------------------------
 
     def _build_inputs(self, parent: ttk.Frame) -> None:
+        """Left-hand panel: the two input groups and the action buttons."""
         left = ttk.Frame(parent)
         left.grid(row=0, column=0, sticky="ns", padx=(0, 10))
 
@@ -95,18 +106,21 @@ class DesignerWindow:
         for row, (name, label, default) in enumerate(REQUIRED_FIELDS):
             self._add_field(required, row, name, label, default)
 
+        # Live hint: the gear ratio implied by z2 and z1.
         self.ratio_label = ttk.Label(required, text="")
         self.ratio_label.grid(row=len(REQUIRED_FIELDS), column=0, columnspan=2, sticky="w", pady=(6, 0))
+        # Live hint: the axial module eq. (2) suggests, with a button to accept it.
         self.module_label = ttk.Label(required, text="")
         self.module_label.grid(row=len(REQUIRED_FIELDS) + 1, column=0, sticky="w", pady=(2, 0))
         self.use_module = ttk.Button(required, text="Use", width=6, command=self.apply_module)
         self.use_module.grid(row=len(REQUIRED_FIELDS) + 1, column=1, sticky="e", pady=(2, 0))
-        self.use_module.grid_remove()
+        self.use_module.grid_remove()   # hidden until there is a suggestion to accept
 
         optional = ttk.LabelFrame(left, text="Rating & strength (optional)", padding=8)
         optional.pack(fill="x", pady=(10, 0))
         for row, (name, label, default) in enumerate(OPTIONAL_FIELDS):
             if name == "load_type":
+                # Load type is a fixed choice, so it gets a read-only dropdown, not an entry.
                 var = tk.StringVar(value=default)
                 self.vars[name] = var
                 ttk.Label(optional, text=label).grid(row=row, column=0, sticky="w", pady=2, padx=(0, 8))
@@ -118,6 +132,7 @@ class DesignerWindow:
         buttons = ttk.Frame(left)
         buttons.pack(fill="x", pady=(12, 0))
         ttk.Button(buttons, text="Calculate", command=self.calculate_clicked).pack(side="left")
+        # The three export buttons stay disabled until a calculation has succeeded.
         self.csv_button = ttk.Button(buttons, text="Export CSV", command=self.export_csv, state="disabled")
         self.csv_button.pack(side="left", padx=(8, 0))
         self.dxf_button = ttk.Button(buttons, text="Export wheel DXF", command=self.export_dxf, state="disabled")
@@ -126,9 +141,11 @@ class DesignerWindow:
                                      state="disabled")
         self.txt_button.pack(side="left", padx=(8, 0))
 
+        # Enter anywhere in the window calculates, as in the web dashboard.
         self.root.bind("<Return>", lambda _event: self.calculate_clicked())
 
     def _add_field(self, parent, row: int, name: str, label: str, default: str) -> None:
+        """One label + entry pair, registered in self.vars under `name`."""
         var = tk.StringVar(value=default)
         self.vars[name] = var
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=2, padx=(0, 8))
@@ -137,6 +154,7 @@ class DesignerWindow:
     # ----- results --------------------------------------------------------
 
     def _build_results(self, parent: ttk.Frame) -> None:
+        """Right-hand side: three tabs - result table, equation reference, sketch."""
         notebook = ttk.Notebook(parent)
         notebook.grid(row=0, column=1, sticky="nsew")
         results_tab = ttk.Frame(notebook, padding=8)
@@ -151,21 +169,24 @@ class DesignerWindow:
         self._build_result_table(results_tab)
 
     def _build_equations(self, parent: ttk.Frame) -> None:
+        """Equations tab: the static reference list from globoid/equations.py."""
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(0, weight=1)
         text = tk.Text(parent, wrap="word", font=("Segoe UI", 10), padx=8, pady=6, borderwidth=0)
         scroll = ttk.Scrollbar(parent, orient="vertical", command=text.yview)
-        text.configure(yscrollcommand=scroll.set)
+        text.configure(yscrollcommand=scroll.set)   # keep widget and scrollbar in step
         text.grid(row=0, column=0, sticky="nsew")
         scroll.grid(row=0, column=1, sticky="ns")
 
+        # Tags are named styles; each insert below picks one.
         text.tag_configure("section", font=("Segoe UI", 12, "bold"), spacing1=12, spacing3=4)
         text.tag_configure("ref", font=("Segoe UI", 10, "bold"), foreground="#1f4e79", spacing1=8)
         text.tag_configure("formula", font=("Consolas", 11), background="#f2f5f8", lmargin1=16, lmargin2=16,
-                           spacing1=2, spacing3=4)
+                           spacing1=2, spacing3=4)   # monospaced, so the formulas line up
         text.tag_configure("term", lmargin1=24, lmargin2=44, tabs=("130", "190", "240"))
         text.tag_configure("symbol", font=("Consolas", 10, "bold"))
 
+        # Walk the reference data: section -> equation -> the terms of that equation.
         for title, equations in EQUATION_SECTIONS:
             text.insert("end", f"{title}\n", "section")
             for eq in equations:
@@ -173,48 +194,54 @@ class DesignerWindow:
                 text.insert("end", f"{eq['formula']}\n", "formula")
                 text.insert("end", "Where:\n")
                 for symbol, meaning, unit in eq["terms"]:
+                    # Tabs line the three parts up with the "term" tag's tab stops.
                     text.insert("end", f"{symbol}\t{meaning}\t[{unit}]\n", "term")
-        text.configure(state="disabled")
+        text.configure(state="disabled")   # read-only from here on
 
     def _build_geometry(self, parent: ttk.Frame) -> None:
+        """Geometry tab: an explanation line above a drawing canvas."""
         parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(1, weight=1)
+        parent.rowconfigure(1, weight=1)   # the canvas (row 1) grows, the caption does not
         self.geometry_info = ttk.Label(parent, text="Press Calculate to draw the worm and worm wheel.",
                                        justify="left")
         self.geometry_info.grid(row=0, column=0, sticky="w", pady=(0, 6))
         self.canvas = tk.Canvas(parent, background="white", highlightthickness=0)
         self.canvas.grid(row=1, column=0, sticky="nsew")
+        # Redraw whenever the canvas is resized, so the views stay centred and to scale.
         self.canvas.bind("<Configure>", lambda _event: self.draw_geometry())
 
     def _build_result_table(self, parent: ttk.Frame) -> None:
+        """Results tab: a message area for errors/warnings above the parameter table."""
         right = parent
         right.columnconfigure(0, weight=1)
-        right.rowconfigure(1, weight=1)
+        right.rowconfigure(1, weight=1)   # the table takes the spare height
 
+        # Messages pane: styled like the window background so it reads as plain text.
         self.messages = tk.Text(right, height=7, wrap="word", relief="flat", borderwidth=0,
                                 background=self.root.cget("background"), state="disabled")
         self.messages.tag_configure("title", font=("Segoe UI", 10, "bold"))
-        self.messages.tag_configure("error", foreground="#b00020")
-        self.messages.tag_configure("warn", foreground="#8a5a00")
+        self.messages.tag_configure("error", foreground="#b00020")   # red for errors
+        self.messages.tag_configure("warn", foreground="#8a5a00")    # amber for warnings
         self.messages.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        self.messages.grid_remove()
+        self.messages.grid_remove()   # hidden while there is nothing to report
 
         table_frame = ttk.Frame(right)
         table_frame.grid(row=1, column=0, sticky="nsew")
         table_frame.columnconfigure(0, weight=1)
         table_frame.rowconfigure(0, weight=1)
 
+        # Treeview in "tree headings" mode: section rows are parents, result rows children.
         self.table = ttk.Treeview(table_frame, columns=COLUMNS, show="tree headings", selectmode="browse")
         self.table.heading("#0", text="")
-        self.table.column("#0", width=0, stretch=False)
+        self.table.column("#0", width=0, stretch=False)   # collapse the unused tree column
         widths = {"symbol": 90, "parameter": 380, "value": 110, "unit": 90, "ref": 130, "note": 110}
         for col, heading in zip(COLUMNS, HEADINGS):
             self.table.heading(col, text=heading)
-            anchor = "e" if col == "value" else "w"
+            anchor = "e" if col == "value" else "w"       # numbers right-aligned, text left
             self.table.column(col, width=widths[col], anchor=anchor, stretch=col in ("parameter", "note"))
         self.table.tag_configure("section", font=("Segoe UI", 10, "bold"), background="#e8eef5")
-        self.table.tag_configure("bad", foreground="#b00020")
-        self.table.tag_configure("ok", foreground="#1b7a2e")
+        self.table.tag_configure("bad", foreground="#b00020")   # failed check
+        self.table.tag_configure("ok", foreground="#1b7a2e")    # passed check
 
         ysb = ttk.Scrollbar(table_frame, orient="vertical", command=self.table.yview)
         self.table.configure(yscrollcommand=ysb.set)
@@ -224,25 +251,29 @@ class DesignerWindow:
         self.show_message("Enter the design inputs and press Calculate.", "")
 
     def show_message(self, text: str, tag: str) -> None:
+        """Replace the contents of the message pane (it is read-only between edits)."""
         self.messages.configure(state="normal")
         self.messages.delete("1.0", "end")
         self.messages.insert("end", text, tag)
         self.messages.configure(state="disabled")
 
     def render(self, result: dict) -> None:
-        self.table.delete(*self.table.get_children())
+        """Show a calculation: errors, or warnings plus the full parameter table."""
+        self.table.delete(*self.table.get_children())   # clear the previous run
         self.messages.configure(state="normal")
         self.messages.delete("1.0", "end")
 
+        # Case 1: the inputs were rejected. Show the reasons, leave the table empty.
         if result.get("errors"):
             self.messages.insert("end", "Cannot calculate\n", ("title", "error"))
             for error in result["errors"]:
                 self.messages.insert("end", f"• {error}\n", "error")
             self.messages.configure(state="disabled")
-            self.messages.grid()
-            self.draw_geometry()
+            self.messages.grid()          # make the pane visible
+            self.draw_geometry()          # clears the sketch and explains why
             return
 
+        # Case 2: it worked. Show the warnings if there are any, otherwise hide the pane.
         if result["warnings"]:
             self.messages.insert("end", "Design checks\n", "title")
             for warning in result["warnings"]:
@@ -252,11 +283,13 @@ class DesignerWindow:
             self.messages.grid_remove()
         self.messages.configure(state="disabled")
 
+        # One parent row per section, with its result rows underneath.
         for section in result["sections"]:
             parent = self.table.insert("", "end", text="", values=(section["title"], "", "", "", "", ""),
                                        tags=("section",), open=True)
             for row in section["rows"]:
                 note = row["note"]
+                # Colour the row by the verdict the calculator put in the note column.
                 tags = ()
                 if note == "OK":
                     tags = ("ok",)
@@ -272,19 +305,24 @@ class DesignerWindow:
         """Dimensions needed for the sketch, taken from the last calculation."""
         if not self.result or self.result.get("errors"):
             return None
+        # Start from the inputs, then flatten every symbolled result row into one lookup.
         values = {"a": self.result["inputs"]["a"], "z2": self.result["inputs"]["z2"]}
         for section in self.result["sections"]:
             for row in section["rows"]:
                 if row["symbol"]:
+                    # setdefault: the first occurrence wins, so a repeated symbol keeps
+                    # the value from the section it is primarily reported in.
                     values.setdefault(row["symbol"], row["value"])
+        # Without all of these there is nothing to draw (e.g. text-valued rows).
         needed = ("d_a1", "d_w1", "d_f1", "d_a2", "d_w2", "d_f2", "b_1eff", "b_2", "delta_m1")
         if not all(isinstance(values.get(k), (int, float)) for k in needed):
             return None
         return values
 
     def draw_geometry(self) -> None:
+        """Redraw the three scale views: central plane, worm section, gear section."""
         canvas = self.canvas
-        canvas.delete("all")
+        canvas.delete("all")                 # start from an empty canvas every time
         if not self.result:
             self.geometry_info.configure(text="Press Calculate to draw the worm and worm wheel.")
             return
@@ -298,6 +336,7 @@ class DesignerWindow:
         d_e1 = 2 * self._globoid_radius(a, d["d_a1"] / 2, b1 / 2)
         d_e2 = 2 * self._globoid_radius(a, d["d_a2"] / 2, b2 / 2)
 
+        # Caption above the canvas: the key dimensions plus how to read the views.
         self.geometry_info.configure(text=(
             f"a = {a:g} mm    dw1 = {d['d_w1']:.2f} mm    dw2 = {d['d_w2']:.2f} mm    "
             f"b1eff = {b1:.2f} mm    b2 = {b2:.2f} mm    de1 = {d_e1:.2f} mm    de2 = {d_e2:.2f} mm\n"
@@ -314,19 +353,22 @@ class DesignerWindow:
             "dash-dot: envelope (end) diameter and axes    all views to scale"))
 
         w, h = canvas.winfo_width(), canvas.winfo_height()
+        # During the first layout pass the canvas has no useful size yet; the
+        # <Configure> binding will call this again once it does.
         if w < 200 or h < 200:
             return
 
-        r_e1, r_e2 = d_e1 / 2, d_e2 / 2
+        r_e1, r_e2 = d_e1 / 2, d_e2 / 2      # envelope radii, used for the view extents
 
         # View 1: central plane (figure 2 of the standard). The central plane contains the
         # worm axis and the line of centres and is perpendicular to the gear axis, so the
         # gear is seen along its own axis as circles and the worm is seen in elevation as
         # the hourglass. Worm centre O1 at the origin, gear centre O2 one centre distance
         # away along the line of centres.
-        box = (10, 10, w * 0.56, h - 10)
+        box = (10, 10, w * 0.56, h - 10)     # left 56 % of the canvas
         r_g2 = d["d_a2"] / 2
-        half_span = max(r_g2, 0.62 * b1)
+        half_span = max(r_g2, 0.62 * b1)     # how wide the view has to be
+        # tf maps millimetres to canvas pixels for this box; the scale is discarded here.
         tf, _ = self._transform(box, -half_span, half_span, -r_e1 * 1.9, a + r_g2 * 1.12)
         self._caption(box, "Central plane (contains the worm axis and the line of centres)")
         # Line of centres and the worm axis.
@@ -336,19 +378,20 @@ class DesignerWindow:
         # faces, out of this plane, so figure 2 does not show it here.
         teeth = self._draw_teeth(tf, 0.0, a, d)
         self._rings(tf, 0.0, a, d["d_a2"], d["d_w2"], d["d_f2"], "gear", "O2", "da2",
-                    draw_out=not teeth)
+                    draw_out=not teeth)      # with teeth drawn, skip the plain tip circle
         if teeth:
             # Beside the rim, clear of the da2 and db labels on the centre line.
             self._text(tf, d["d_a2"] / 2, a,
                        f"z2 = {int(d['z2'])} teeth\nsmx2 = {d['s_mx2']:.2f} on dw2", "e")
+        # Base circle of the involute, when the calculator reported one.
         d_b = d.get("d_b")
         if isinstance(d_b, (int, float)) and d_b > 0:
             self._circle(tf, 0.0, a, d_b, "#555555", None, 1)
             self._text(tf, 0.0, a + d_b / 2, f"base circle db = {d_b:.2f}", "n")
         # Worm: hourglass elevation about O1, meshing into the gear rim.
         self._globoid_body(tf, a, b1, d["d_f1"] / 2, d["d_a1"] / 2, "#e8f0f8", "#1f4e79")
-        self._globoid_curve(tf, a, b1, d["d_w1"] / 2, "#b35900", (6, 4), 1)
-        self._globoid_curve(tf, a, b1, d["d_f1"] / 2, "#666666", (2, 3), 1)
+        self._globoid_curve(tf, a, b1, d["d_w1"] / 2, "#b35900", (6, 4), 1)   # pitch, dashed
+        self._globoid_curve(tf, a, b1, d["d_f1"] / 2, "#666666", (2, 3), 1)   # root, dotted
         self._text(tf, -b1 / 2, -r_e1, "worm", "s")
         # Centre distance along the line of centres, and half the thread length from it.
         xdim = -half_span
@@ -364,13 +407,13 @@ class DesignerWindow:
         # View 2: worm axial section. Hourglass body: outside, pitch and root are globoid
         # arcs struck from the gear axis, so the worm necks down to the throat at the
         # central plane and swells to de1 at both ends of the thread length.
-        box = (w * 0.6, 10, w - 10, h / 2 - 5)
+        box = (w * 0.6, 10, w - 10, h / 2 - 5)     # top right quarter
         tf, _ = self._transform(box, -0.95 * b1, 0.95 * b1, -r_e1 * 1.3, r_e1 * 1.3)
         self._caption(box, "Worm axial section (globoid, hourglass)")
         self._globoid_body(tf, a, b1, d["d_f1"] / 2, d["d_a1"] / 2, "#e8f0f8", "#1f4e79")
         self._globoid_curve(tf, a, b1, d["d_w1"] / 2, "#b35900", (6, 4), 1)
         self._globoid_curve(tf, a, b1, d["d_f1"] / 2, "#666666", (2, 3), 1)
-        self._line(tf, (-b1 * 0.92, 0.0), (b1 * 0.92, 0.0), "#999999", (10, 3, 2, 3), 1)
+        self._line(tf, (-b1 * 0.92, 0.0), (b1 * 0.92, 0.0), "#999999", (10, 3, 2, 3), 1)  # worm axis
         self._text(tf, 0.0, d["d_a1"] / 2, f"da1 = {d['d_a1']:.2f}", "s")
         self._text(tf, 0.0, -d["d_a1"] / 2, f"dw1 = {d['d_w1']:.2f}   df1 = {d['d_f1']:.2f}", "n")
         self._text(tf, b1 / 2, r_e1, f"de1 = {d_e1:.2f}", "e")
@@ -379,13 +422,13 @@ class DesignerWindow:
 
         # View 3: gear axial section through the gear axis. The rim is throated: tip and
         # root surfaces are globoid arcs struck from the worm axis, wrapping round the worm.
-        box = (w * 0.6, h / 2 + 5, w - 10, h - 10)
+        box = (w * 0.6, h / 2 + 5, w - 10, h - 10)   # bottom right quarter
         tf, _ = self._transform(box, -1.5 * b2, 1.5 * b2, -r_e2 * 1.08, r_e2 * 1.08)
         self._caption(box, "Gear axial section (throated rim)")
         self._globoid_body(tf, a, b2, d["d_f2"] / 2, d["d_a2"] / 2, "#e8f0f8", "#1f4e79")
         self._globoid_curve(tf, a, b2, d["d_w2"] / 2, "#b35900", (6, 4), 1)
         self._globoid_curve(tf, a, b2, d["d_f2"] / 2, "#666666", (2, 3), 1)
-        self._line(tf, (-b2 * 0.95, 0.0), (b2 * 0.95, 0.0), "#999999", (10, 3, 2, 3), 1)
+        self._line(tf, (-b2 * 0.95, 0.0), (b2 * 0.95, 0.0), "#999999", (10, 3, 2, 3), 1)  # gear axis
         # The rim diameters are close together, so they are listed beside the view
         # rather than written on the arcs they belong to.
         self._text(tf, b2 * 1.2, 0.0,
@@ -406,8 +449,9 @@ class DesignerWindow:
         drawn radially, which is the constant the formula returns there.
         """
         if r <= r_b:
-            return half_angle + inv_alpha
-        alpha_r = math.acos(min(1.0, r_b / r))
+            return half_angle + inv_alpha              # below the base circle: radial flank
+        alpha_r = math.acos(min(1.0, r_b / r))         # pressure angle at this radius
+        # The involute function tan(a) - a, subtracted so the flank converges to the tip.
         return half_angle + inv_alpha - (math.tan(alpha_r) - alpha_r)
 
     def _tooth_outline(self, z, d_pitch, d_tip, d_root, s_pitch, alpha_deg, phase,
@@ -418,36 +462,40 @@ class DesignerWindow:
         calculated ones, so the teeth drawn are the teeth of the result table:
         z2 of them, s_mx2 thick on the pitch circle, running from df2 to da2.
         """
-        r_p, r_a, r_f = d_pitch / 2.0, d_tip / 2.0, d_root / 2.0
+        r_p, r_a, r_f = d_pitch / 2.0, d_tip / 2.0, d_root / 2.0   # pitch, tip, root radii
         alpha = math.radians(alpha_deg)
-        r_b = r_p * math.cos(alpha)
-        inv_alpha = math.tan(alpha) - alpha
+        r_b = r_p * math.cos(alpha)                 # base circle of the involute
+        inv_alpha = math.tan(alpha) - alpha         # involute function at the pitch circle
         half_angle = s_pitch / d_pitch  # half the tooth arc at the pitch circle
 
         def offset(r):
+            """Half the angular tooth width at radius r."""
             return self._involute_offset(r_b, r, half_angle, inv_alpha)
 
-        r_lo = max(r_f, r_b)
+        r_lo = max(r_f, r_b)        # the involute only exists outside the base circle
         r_hi = max(r_lo, r_a)
         if offset(r_lo) <= 0:
-            return []
+            return []               # no tooth at all: nothing sensible to draw
+
         # A tooth that comes to a point below the throat diameter is drawn only
         # as far as the two flanks meet.
         if offset(r_hi) <= 0:
+            # Bisection for the radius where the tooth width reaches zero.
             lo, hi = r_lo, r_hi
             for _ in range(40):
                 mid = (lo + hi) / 2.0
                 lo, hi = (mid, hi) if offset(mid) > 0 else (lo, mid)
             r_hi = lo
 
-        pitch_angle = 2 * math.pi / z
+        pitch_angle = 2 * math.pi / z   # angle from one tooth to the next
+        # Radii at which the flank is sampled, from r_lo up to the tip.
         radii = [r_lo + (r_hi - r_lo) * i / flank_steps for i in range(flank_steps + 1)]
         if r_f < r_lo:
-            radii.insert(0, r_f)
+            radii.insert(0, r_f)        # add the radial piece down to the root
 
         points = []
-        for k in range(z):
-            centre = phase + k * pitch_angle
+        for k in range(z):                        # once round the gear
+            centre = phase + k * pitch_angle      # this tooth's centre line
             for r in radii:  # up the trailing flank
                 points.append((r, centre - offset(r)))
             top = offset(r_hi)
@@ -466,9 +514,9 @@ class DesignerWindow:
         """Draw the worm wheel teeth about (cx, cy). False if they are unknown."""
         z, s_pitch, alpha = d.get("z2"), d.get("s_mx2"), d.get("alpha_x")
         if not all(isinstance(v, (int, float)) for v in (z, s_pitch, alpha)):
-            return False
+            return False            # caller then draws a plain tip circle instead
         if z < 3 or s_pitch <= 0 or d["d_f2"] <= 0:
-            return False
+            return False            # degenerate geometry
         # A tooth space is centred on the line of centres, where the worm
         # thread meshes; the gear centre sits one centre distance above O1.
         phase = -math.pi / 2 + math.pi / z
@@ -476,6 +524,8 @@ class DesignerWindow:
                                      s_pitch, alpha, phase)
         if len(points) < 4:
             return False
+        # Convert the polar outline to a flat [x1, y1, x2, y2, ...] pixel list.
+        # points[:1] repeats the first point, closing the outline.
         flat = []
         for r, theta in points + points[:1]:
             flat.extend(tf(cx + r * math.cos(theta), cy + r * math.sin(theta)))
@@ -494,8 +544,8 @@ class DesignerWindow:
         member therefore grows from r_throat at the central plane outwards, which
         is what makes the worm an hourglass and the gear rim throated.
         """
-        big_r = abs(a - r_throat)
-        axial = min(abs(axial), 0.995 * big_r)
+        big_r = abs(a - r_throat)                   # the generating radius R
+        axial = min(abs(axial), 0.995 * big_r)      # keep the sqrt argument positive
         return a - math.sqrt(big_r * big_r - axial * axial)
 
     def _globoid_points(self, a, length, r_throat, segments=72):
@@ -524,6 +574,7 @@ class DesignerWindow:
         inner = self._globoid_points(a, length, r_inner)
         outer = self._globoid_points(a, length, r_outer)
         for sign in (1.0, -1.0):
+            # Out along the outer arc and back along the inner one closes the shape.
             ring = [(x, sign * r) for x, r in outer] + [(x, sign * r) for x, r in reversed(inner)]
             flat = [coord for x, r in ring for coord in tf(x, r)]
             self.canvas.create_polygon(flat, fill=fill, outline=outline, width=2)
@@ -531,20 +582,26 @@ class DesignerWindow:
     def _transform(self, box, xmin, xmax, ymin, ymax, pad=50):
         """Map world coordinates (mm, y up) into the canvas box, keeping the scale."""
         x0, y0, x1, y1 = box
+        # One scale for both axes (the smaller of the two fits), so nothing is distorted.
         scale = min((x1 - x0 - 2 * pad) / (xmax - xmin), (y1 - y0 - 2 * pad) / (ymax - ymin))
-        ox = (x0 + x1) / 2 - scale * (xmin + xmax) / 2
+        ox = (x0 + x1) / 2 - scale * (xmin + xmax) / 2   # offsets that centre the content
         oy = (y0 + y1) / 2 + scale * (ymin + ymax) / 2
+        # The returned function flips y, because canvas y grows downwards.
         return (lambda x, y: (ox + scale * x, oy - scale * y)), scale
 
     def _caption(self, box, text) -> None:
+        """Bold title in the top-left corner of a view box."""
         self.canvas.create_text(box[0] + 6, box[1] + 4, text=text, anchor="nw",
                                 font=("Segoe UI", 10, "bold"), fill="#222222")
 
     def _line(self, tf, p1, p2, color, dash, width, arrow=None) -> None:
+        """Straight line between two world points."""
         self.canvas.create_line(*tf(*p1), *tf(*p2), fill=color, dash=dash, width=width, arrow=arrow)
 
     def _circle(self, tf, cx, cy, diameter, color, dash, width) -> None:
+        """Circle of the given diameter about a world centre."""
         r = diameter / 2
+        # Tk draws an oval from its bounding box; tf flips y, so top-left comes from +r.
         x0, y0 = tf(cx - r, cy + r)
         x1, y1 = tf(cx + r, cy - r)
         self.canvas.create_oval(x0, y0, x1, y1, outline=color, dash=dash, width=width)
@@ -552,6 +609,7 @@ class DesignerWindow:
     def _text(self, tf, x, y, text, where) -> None:
         """Label at a world point. `where` picks the side: n, s, e, w."""
         px, py = tf(x, y)
+        # Per side: pixel offset in x and y, and the anchor that pushes the text outwards.
         offset = {"n": (0, -8, "s"), "s": (0, 8, "n"), "e": (8, 0, "w"), "w": (-8, 0, "e")}[where]
         self.canvas.create_text(px + offset[0], py + offset[1], text=text, anchor=offset[2],
                                 fill="#222222", font=("Segoe UI", 9))
@@ -566,18 +624,22 @@ class DesignerWindow:
         """
         # With the teeth drawn, the tooth tips are the outside circle, so a full
         # circle through the tooth spaces is left out (draw_out=False).
-        circles = [(d_pitch, (6, 4), "#b35900", 1),
-                   (d_root, (2, 3), "#666666", 1)]
+        circles = [(d_pitch, (6, 4), "#b35900", 1),     # pitch: dashed, orange
+                   (d_root, (2, 3), "#666666", 1)]      # root: dotted, grey
         if draw_out:
-            circles.insert(0, (d_out, None, "#1f4e79", 2))
+            circles.insert(0, (d_out, None, "#1f4e79", 2))        # throat: solid, blue
         if d_env is not None:
-            circles.append((d_env, (10, 3, 2, 3), "#1f4e79", 1))
+            circles.append((d_env, (10, 3, 2, 3), "#1f4e79", 1))  # envelope: dash-dot
         for diameter, dash, color, width in circles:
             self._circle(tf, cx, cy, diameter, color, dash, width)
+
+        # Centre mark: a small cross at the axis, labelled O1 / O2.
         px, py = tf(cx, cy)
         self.canvas.create_line(px - 5, py, px + 5, py, fill="#333333")
         self.canvas.create_line(px, py - 5, px, py + 5, fill="#333333")
         self.canvas.create_text(px + 8, py + 8, text=centre, anchor="nw", fill="#333333", font=("Segoe UI", 9))
+
+        # Diameter labels, written on top of the circles they belong to.
         self.canvas.create_text(*tf(cx, cy + d_out / 2), text=f"{out_label} = {d_out:.2f}",
                                 anchor="s", fill="#1f4e79", font=("Segoe UI", 9))
         if d_env is not None and env_label:
@@ -590,35 +652,43 @@ class DesignerWindow:
     # ----- actions --------------------------------------------------------
 
     def update_hints(self) -> None:
+        """Refresh the ratio and suggested-module hints as the inputs are typed."""
         z2 = parse_float(self.vars["z2"].get())
         z1 = parse_float(self.vars["z1"].get())
         a = parse_float(self.vars["a"].get())
 
+        # Gear ratio hint, eq. (1). Shown only when both counts are usable.
         if z2 and z1 and z2 > 0 and z1 > 0:
             self.ratio_label.configure(text=f"Gear ratio u = z2/z1 = {round(z2 / z1, 4)}")
         else:
             self.ratio_label.configure(text="")
 
+        # Module hint: eqs. (2), (4) and (6) combined, i.e. m_a = (2a - a^0.875/1.47)/z2.
         if a and z2 and a > 0 and z2 > 0:
             ma = (2 * a - a ** 0.875 / 1.47) / z2
             self.suggested_module = round(ma, 4)
             self.module_label.configure(text=f"Eq. 2 suggests ma ≈ {self.suggested_module} mm")
-            self.use_module.grid()
+            self.use_module.grid()          # show the "Use" button
         else:
             self.suggested_module = None
             self.module_label.configure(text="")
             self.use_module.grid_remove()
 
     def apply_module(self) -> None:
+        """"Use" button: copy the suggested axial module into the m_a field."""
         if self.suggested_module is not None:
             self.vars["m_a"].set(str(self.suggested_module))
 
     def calculate_clicked(self) -> None:
+        """Calculate button (and Enter): run the design and refresh the whole window."""
+        # Every field as text, keyed by name — exactly what DesignInput.from_dict expects.
         payload = {name: var.get() for name, var in self.vars.items()}
         try:
             self.result = calculate(DesignInput.from_dict(payload))
         except DesignError as exc:
+            # Rejected inputs are stored in the same shape as a result, with errors filled in.
             self.result = {"errors": exc.errors, "warnings": [], "sections": []}
+        # Exports only make sense for a successful run; the DXF also needs full geometry.
         state = "disabled" if self.result.get("errors") else "normal"
         self.csv_button.configure(state=state)
         self.txt_button.configure(state=state)
@@ -626,24 +696,28 @@ class DesignerWindow:
         self.render(self.result)
 
     def export_csv(self) -> None:
+        """Write every section row, then the warnings, to a CSV file."""
         if not self.result or self.result.get("errors"):
             return
         path = filedialog.asksaveasfilename(
             parent=self.root, defaultextension=".csv", initialfile="globoidal_worm_gearset.csv",
             filetypes=[("CSV files", "*.csv")])
         if not path:
-            return
+            return                     # the user cancelled the dialog
         try:
+            # newline="" is required on Windows, or csv writes blank lines between rows.
             with open(path, "w", newline="", encoding="utf-8") as handle:
                 writer = csv.writer(handle)
                 writer.writerow(["Section", "Symbol", "Parameter", "Value", "Unit", "Reference", "Note"])
                 for section in self.result["sections"]:
                     for row in section["rows"]:
+                        # The unrounded value is exported, not the displayed string.
                         writer.writerow([section["title"], row["symbol"], row["name"], row["value"],
                                          row["unit"], row["ref"], row["note"]])
                 for warning in self.result["warnings"]:
                     writer.writerow(["Warning", "", warning])
         except OSError as exc:
+            # Read-only folder, file open in Excel, bad path, ...
             messagebox.showerror("Export CSV", f"Could not save the file:\n{exc}", parent=self.root)
 
     def export_equations(self) -> None:
@@ -661,9 +735,10 @@ class DesignerWindow:
             messagebox.showerror("Export equations", f"Could not save the file:\n{exc}", parent=self.root)
 
     def export_dxf(self) -> None:
+        """Save the worm wheel front view and axial section as a DXF drawing."""
         dims = self._geometry_dims()
         if dims is None:
-            return
+            return                     # no usable geometry to draw
         path = filedialog.asksaveasfilename(
             parent=self.root, defaultextension=".dxf", initialfile="worm_wheel.dxf",
             filetypes=[("DXF files", "*.dxf")])
@@ -676,6 +751,7 @@ class DesignerWindow:
 
 
 def run() -> None:
-    root = tk.Tk()
-    DesignerWindow(root)
-    root.mainloop()
+    """Open the window and hand control to Tkinter (called by app.py)."""
+    root = tk.Tk()                 # the root window
+    DesignerWindow(root)           # builds every widget inside it
+    root.mainloop()                # event loop; returns when the window is closed

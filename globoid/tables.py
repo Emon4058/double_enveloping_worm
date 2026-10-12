@@ -1,6 +1,7 @@
 """Tabulated data from ANSI/AGMA 6135-A02 used by the calculator."""
 
 # Table 6 - Velocity factor Zv as (sliding velocity Vg [m/s], Zv) pairs, 0 to 30 m/s.
+# Sorted on Vg, which is what calculator._interp() needs to interpolate between rows.
 ZV_TABLE = (
     (0.0, 0.75), (0.01, 0.745), (0.02, 0.74), (0.03, 0.735), (0.04, 0.73),
     (0.05, 0.725), (0.06, 0.721), (0.07, 0.716), (0.08, 0.711), (0.09, 0.706),
@@ -186,6 +187,9 @@ GEAR_TEETH_TABLE = (
 )
 
 # Table D.1 - Service factors, by hours/day and load type.
+# SERVICE_FACTOR_HOURS holds the column headings; each row below has one factor
+# per column, in the same order. A duty is read from the first column that is at
+# or above the hours actually worked.
 SERVICE_FACTOR_HOURS = (0.5, 1.0, 2.0, 10.0, 24.0)
 SERVICE_FACTOR_TABLE = {
     "uniform": (1.0, 1.0, 1.0, 1.0, 1.2),
@@ -197,6 +201,8 @@ SERVICE_FACTOR_TABLE = {
 # Figure F.1 - Typical efficiencies [%] of globoidal single reduction reducers,
 # read off the curves at ratios 5..70 for each worm speed [rpm]. These are
 # approximate readings of a chart, intended only as a default estimate.
+# EFFICIENCY_RATIOS is the shared ratio axis; each curve below is keyed by worm
+# speed [rpm] and holds one efficiency per ratio, in the same order.
 EFFICIENCY_RATIOS = (5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0)
 EFFICIENCY_CURVES = {
     100.0: (94.5, 90.0, 82.0, 74.5, 67.0, 61.0, 57.0, 55.0),

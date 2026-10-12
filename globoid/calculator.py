@@ -8,35 +8,40 @@ Units: lengths in mm, angles in degrees, power in kW, torque in N*m,
 forces in N, stresses in N/mm^2, speeds in rpm and m/s.
 """
 
-from __future__ import annotations
+from __future__ import annotations   # allows "list[str]" style hints on older Python versions
 
-import bisect
-import math
-from dataclasses import asdict, dataclass, field
-from typing import Optional
+import bisect                                              # binary search, used by the table interpolator
+import math                                                # trigonometry, exp, sqrt, pi
+from dataclasses import asdict, dataclass, field           # input/result containers and dict conversion
+from typing import Optional                                # marks inputs that may be left blank
 
+# Tabulated data lifted from the standard (see tables.py for the raw numbers).
 from .tables import (
-    EFFICIENCY_CURVES,
-    EFFICIENCY_RATIOS,
-    GEAR_TEETH_TABLE,
-    SERVICE_FACTOR_HOURS,
-    SERVICE_FACTOR_TABLE,
-    ZV_TABLE,
+    EFFICIENCY_CURVES,      # figure F.1: efficiency vs ratio, one curve per worm speed
+    EFFICIENCY_RATIOS,      # the ratio axis those curves are sampled on
+    GEAR_TEETH_TABLE,       # table 2: recommended gear tooth counts by centre distance
+    SERVICE_FACTOR_HOURS,   # table D.1: the hours/day columns
+    SERVICE_FACTOR_TABLE,   # table D.1: service factor per load type
+    ZV_TABLE,               # table 6: velocity factor vs sliding velocity
 )
 
-E_STEEL = 206_850.0  # N/mm^2, Annex B.5
+E_STEEL = 206_850.0  # N/mm^2, Annex B.5 — default Young's modulus for a steel worm
 
 
 class DesignError(ValueError):
     """Raised when the inputs cannot produce a valid gearset."""
 
     def __init__(self, errors: list[str]):
+        # Join the individual complaints for the standard exception message, ...
         super().__init__("; ".join(errors))
+        # ... but keep the list itself so the GUI and the web API can show them one per line.
         self.errors = errors
 
 
 @dataclass
 class DesignInput:
+    """One complete set of design inputs. The five required ones fix the geometry."""
+
     # Required inputs
     z2: int  # number of teeth in gear (worm wheel)
     a: float  # center distance, mm
@@ -65,23 +70,32 @@ class DesignInput:
 
     @classmethod
     def from_dict(cls, data: dict) -> "DesignInput":
+        """Build a DesignInput from the raw strings a form (GUI or web page) submits."""
+
         def num(key, cast=float, default=None):
+            """Read one field: blank or missing -> default, non-numeric -> DesignError."""
             value = data.get(key, default)
+            # Treat an absent key and an empty text box as "not entered".
             if value is None or (isinstance(value, str) and value.strip() == ""):
                 return default
             try:
+                # For integer fields go through float() first, so "30.0" is accepted as 30.
                 return cast(float(value)) if cast is int else cast(value)
             except (TypeError, ValueError):
                 raise DesignError([f"'{key}' must be a number, got {value!r}"])
 
+        # The five inputs that have no sensible default: refuse to continue without them.
         required = ("z2", "a", "z1", "alpha_n", "m_a")
         missing = [k for k in required if num(k) is None]
         if missing:
             raise DesignError([f"Missing required input: {k}" for k in missing])
+
+        # Tooth and thread counts must be whole numbers; catch "30.5" before it is truncated.
         for k in ("z2", "z1"):
             if float(data[k]) != int(float(data[k])):
                 raise DesignError([f"'{k}' must be a whole number"])
 
+        # Convert every field with its own type and default, then hand them to the dataclass.
         return cls(
             z2=num("z2", int),
             a=num("a"),
@@ -90,9 +104,9 @@ class DesignInput:
             m_a=num("m_a"),
             n1=num("n1", default=1750.0),
             backlash=num("backlash", default=0.0),
-            efficiency=num("efficiency"),
-            input_power=num("input_power"),
-            service_factor=num("service_factor"),
+            efficiency=num("efficiency"),            # left None -> estimated from figure F.1
+            input_power=num("input_power"),          # left None -> the rated power P_1 is used
+            service_factor=num("service_factor"),    # left None -> looked up in table D.1
             hours_per_day=num("hours_per_day", default=10.0),
             load_type=str(data.get("load_type") or "uniform").lower(),
             bearing_la=num("bearing_la"),
@@ -105,20 +119,26 @@ class DesignInput:
 
 @dataclass
 class Row:
-    symbol: str
-    name: str
-    value: object
-    unit: str = ""
-    ref: str = ""
-    note: str = ""
+    """One line of a result table."""
+
+    symbol: str        # the symbol used in the standard, e.g. "d_w1"
+    name: str          # plain-language description
+    value: object      # a number, or text for ranges such as "30 - 45"
+    unit: str = ""     # mm, deg, kW, ...
+    ref: str = ""      # the clause or equation the value comes from
+    note: str = ""     # how it was derived, or a pass/fail verdict ("OK", "EXCEEDED")
 
 
 @dataclass
 class Section:
+    """A group of rows shown under one heading."""
+
     title: str
+    # A fresh list per Section instance (a plain [] default would be shared by all of them).
     rows: list[Row] = field(default_factory=list)
 
     def add(self, *args, **kwargs) -> None:
+        """Append a row; the arguments are those of Row."""
         self.rows.append(Row(*args, **kwargs))
 
 
@@ -128,7 +148,8 @@ class Section:
 
 def basic_pressure_factor(a: float) -> float:
     """Zw, Annex G.2 (equations G.1 - G.7)."""
-    x = a / 25.4
+    x = a / 25.4   # the annex curves are written in inches of centre distance
+    # Seven centre-distance bands, each with its own curve fit to table 3.
     if a <= 76:
         return math.exp(-4.338672) * x ** 2.7067619
     if a <= 102:
@@ -146,6 +167,7 @@ def basic_pressure_factor(a: float) -> float:
 
 def ratio_correction_factor(u: float) -> float:
     """Zu, Annex G.3 (equations G.8 - G.15)."""
+    # Eight ratio bands fitted to table 4; above 73:1 the factor is constant.
     if u < 4:
         return 0.067691 + 0.105 * u
     if u <= 6:
@@ -165,7 +187,7 @@ def ratio_correction_factor(u: float) -> float:
 
 def face_width_material_factor(a: float) -> float:
     """Zm, Annex G.4 (equations G.16 - G.19)."""
-    x = a / 25.4
+    x = a / 25.4   # again inches of centre distance
     if a <= 152:
         return math.exp(-0.7882931) * x ** 0.4478914
     if a <= 305:
@@ -178,15 +200,17 @@ def face_width_material_factor(a: float) -> float:
 
 
 def _interp(x: float, xs, ys) -> float:
+    """Linear interpolation of ys over the sorted xs, clamped at both ends."""
     if x <= xs[0]:
-        return ys[0]
+        return ys[0]          # below the table: hold the first value
     if x >= xs[-1]:
-        return ys[-1]
-    i = bisect.bisect_right(xs, x)
-    x0, x1, y0, y1 = xs[i - 1], xs[i], ys[i - 1], ys[i]
-    return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+        return ys[-1]         # above the table: hold the last value
+    i = bisect.bisect_right(xs, x)                      # index of the first x greater than x
+    x0, x1, y0, y1 = xs[i - 1], xs[i], ys[i - 1], ys[i]  # the bracketing pair of points
+    return y0 + (y1 - y0) * (x - x0) / (x1 - x0)        # straight line between them
 
 
+# Split table 6 into separate x and y lists once, so velocity_factor can interpolate quickly.
 _ZV_X = [p[0] for p in ZV_TABLE]
 _ZV_Y = [p[1] for p in ZV_TABLE]
 
@@ -198,24 +222,26 @@ def velocity_factor(vg: float) -> float:
 
 def estimated_efficiency(u: float, n1: float) -> float:
     """Approximate reducer efficiency [%] read from figure F.1."""
-    speeds = sorted(EFFICIENCY_CURVES)
+    speeds = sorted(EFFICIENCY_CURVES)                     # the worm speeds the chart gives curves for
+    # First interpolate along each speed curve at the requested ratio, ...
     at_speed = [_interp(u, EFFICIENCY_RATIOS, EFFICIENCY_CURVES[s]) for s in speeds]
+    # ... then interpolate between the curves at the requested worm speed.
     return _interp(n1, speeds, at_speed)
 
 
 def service_factor_from_table(hours_per_day: float, load_type: str) -> float:
     """Table D.1; uses the next tabulated hours/day at or above the input."""
-    row = SERVICE_FACTOR_TABLE[load_type]
+    row = SERVICE_FACTOR_TABLE[load_type]                  # the row for this load character
     for hours, sf in zip(SERVICE_FACTOR_HOURS, row):
         if hours_per_day <= hours:
-            return sf
-    return row[-1]
+            return sf                                     # first column that covers the duty
+    return row[-1]                                        # longer than the last column (24 h/day)
 
 
 def recommended_gear_teeth(a: float):
     """Table 2 row for the center distance, or None below 38 mm."""
     for lo, hi, zmin, zmax in GEAR_TEETH_TABLE:
-        if lo <= a < hi:
+        if lo <= a < hi:                                  # half-open band [lo, hi)
             return lo, hi, zmin, zmax
     return None
 
@@ -225,21 +251,29 @@ def recommended_gear_teeth(a: float):
 # ---------------------------------------------------------------------------
 
 def _validate(inp: DesignInput) -> list[str]:
+    """Collect every reason the inputs cannot be used; an empty list means they are fine."""
     errors = []
+
+    # Pass 1: plain sign and range checks on the required inputs.
     for key in ("z2", "a", "z1", "m_a"):
         if getattr(inp, key) <= 0:
             errors.append(f"'{key}' must be greater than zero")
     if not 0 < inp.alpha_n < 45:
         errors.append("Normal pressure angle must be between 0 and 45 degrees")
     if errors:
+        # Stop here: the checks below would divide by or compare against nonsense values.
         return errors
 
+    # Pass 2: checks that need the geometry. The gear pitch diameter (eq. 6) must leave
+    # room for the worm inside 2a, otherwise eq. 4 gives a negative worm diameter.
     d_w2 = inp.m_a * inp.z2
     if d_w2 >= 2 * inp.a:
         errors.append(
             f"Axial module too large: gear pitch diameter m_a*z2 = {d_w2:.3f} mm "
             f"leaves no room for the worm (needs < 2a = {2 * inp.a:.3f} mm)"
         )
+
+    # Pass 3: the optional rating and strength inputs, each only if it was entered.
     if inp.n1 is not None and inp.n1 <= 0:
         errors.append("Worm speed n1 must be greater than zero")
     if inp.efficiency is not None and not 0 < inp.efficiency <= 100:
@@ -248,6 +282,7 @@ def _validate(inp: DesignInput) -> list[str]:
         errors.append("Backlash cannot be negative")
     if inp.load_type not in SERVICE_FACTOR_TABLE:
         errors.append(f"Load type must be one of {', '.join(SERVICE_FACTOR_TABLE)}")
+    # The bearing calculation needs both spans; one alone cannot give a bearing span.
     if (inp.bearing_la is None) != (inp.bearing_lb is None):
         errors.append("Enter both bearing distances L_A and L_B, or neither")
     for key in ("bearing_la", "bearing_lb", "input_power", "service_factor",
@@ -261,15 +296,24 @@ def _validate(inp: DesignInput) -> list[str]:
 
 
 def calculate(inp: DesignInput) -> dict:
+    """Run the whole design: geometry, rating, forces and worm shaft checks.
+
+    Returns a dictionary of {"inputs", "sections", "warnings"} ready for the GUI,
+    the web API, the CSV/DXF exports and the SolidWorks equation file.
+    """
+    # Hard errors stop the calculation; soft findings are collected as warnings below.
     errors = _validate(inp)
     if errors:
         raise DesignError(errors)
 
     warnings: list[str] = []
+    # Short local names for the inputs used over and over in the formulas.
     a, z1, z2, u, m_a = inp.a, inp.z1, inp.z2, inp.u, inp.m_a
     alpha_n = inp.alpha_n
 
     # ---- Clause 3/4 recommendations -------------------------------------
+    # None of these is an error: the design is still computed, the user is just told
+    # where it leaves the range the standard is written for.
     if not 3 <= u <= 100:
         warnings.append(f"Ratio {u:g}:1 is outside the usual 3:1 - 100:1 range (3.3).")
     if not 1 <= z1 <= 10:
@@ -280,6 +324,8 @@ def calculate(inp: DesignInput) -> dict:
         warnings.append("Ratios above 30:1 are usually produced with a single-thread worm (3.3).")
     if u < 30 and z1 == 1:
         warnings.append("Ratios lower than 30:1 favour the use of multiple threads (3.3).")
+
+    # Table 2: recommended tooth count for this centre distance.
     teeth_row = recommended_gear_teeth(a)
     if teeth_row is None:
         warnings.append("Center distance is below 38 mm, outside table 2.")
@@ -287,6 +333,7 @@ def calculate(inp: DesignInput) -> dict:
         lo, hi, zmin, zmax = teeth_row
         if z2 < zmin:
             warnings.append(f"Table 2 recommends at least {zmin} gear teeth for this center distance; z2 = {z2}.")
+        # The upper limit applies only to multiple-threaded worms.
         if z1 > 1 and z2 > zmax:
             warnings.append(
                 f"Table 2 recommends at most {zmax} gear teeth with multiple-threaded worms for this "
@@ -294,58 +341,63 @@ def calculate(inp: DesignInput) -> dict:
             )
 
     # ---- Basic proportions (clause 4) -----------------------------------
-    d_w1_approx = a ** 0.875 / 1.47  # eq. 2
-    d_f1_min = a ** 0.875 / 2.0  # eq. 3
-    m_a_rec = (2 * a - d_w1_approx) / z2  # eqs. 4 and 6 with eq. 2
+    d_w1_approx = a ** 0.875 / 1.47  # eq. 2   first guess at the worm pitch diameter
+    d_f1_min = a ** 0.875 / 2.0  # eq. 3       smallest worm root diameter the standard allows
+    m_a_rec = (2 * a - d_w1_approx) / z2  # eqs. 4 and 6 with eq. 2 -> the module that guess implies
 
-    d_w2 = m_a * z2  # eq. 6 rearranged
-    d_w1 = 2 * a - d_w2  # eq. 4 rearranged
-    p_t2 = math.pi * d_w2 / z2  # eq. 5
-    delta = math.atan(d_w2 / (d_w1 * u))  # eq. 7
-    delta_deg = math.degrees(delta)
-    p_n1 = p_t2 * math.cos(delta)  # eq. 8
-    m_n = m_a * math.cos(delta)  # eq. 9
-    h = p_n1 / 2.0  # eq. 10, h1 = h2
-    h_w = 0.9 * h  # eq. 11
-    h_am = h_w / 2.0  # eq. 12
-    c = h - h_w  # eqs. 13, 14
-    h_fm = h - h_am  # eqs. 15, 16
-    d_a1 = d_w1 + 2 * h_am  # eq. 17
-    d_f1 = d_w1 - 2 * h_fm  # eq. 18
-    alpha_x = math.atan(math.tan(math.radians(alpha_n)) / math.cos(delta))  # eq. 19
+    d_w2 = m_a * z2  # eq. 6 rearranged        gear pitch diameter from the chosen module
+    d_w1 = 2 * a - d_w2  # eq. 4 rearranged    what is left of 2a is the worm pitch diameter
+    p_t2 = math.pi * d_w2 / z2  # eq. 5        circular pitch = worm axial pitch
+    delta = math.atan(d_w2 / (d_w1 * u))  # eq. 7   lead angle at the pitch point (radians)
+    delta_deg = math.degrees(delta)       #          the same angle in degrees, for reporting
+    p_n1 = p_t2 * math.cos(delta)  # eq. 8     pitch measured normal to the thread
+    m_n = m_a * math.cos(delta)  # eq. 9       normal module
+    h = p_n1 / 2.0  # eq. 10, h1 = h2          whole depth, same for worm and gear
+    h_w = 0.9 * h  # eq. 11                    working (contacting) depth
+    h_am = h_w / 2.0  # eq. 12                 addendum, half the working depth
+    c = h - h_w  # eqs. 13, 14                 clearance left at the bottom of the tooth
+    h_fm = h - h_am  # eqs. 15, 16             dedendum = whole depth minus addendum
+    d_a1 = d_w1 + 2 * h_am  # eq. 17           worm throat (outside) diameter
+    d_f1 = d_w1 - 2 * h_fm  # eq. 18           worm root diameter
+    alpha_x = math.atan(math.tan(math.radians(alpha_n)) / math.cos(delta))  # eq. 19 axial pressure angle
     alpha_x_deg = math.degrees(alpha_x)
 
-    # Gear tooth / worm thread thickness (4.20)
+    # Gear tooth / worm thread thickness (4.20). The pitch is split 55/45 in the gear's
+    # favour, and the backlash is taken out of the worm thread.
     s_mx2 = 0.55 * p_t2
     s_mx1 = 0.45 * p_t2 - inp.backlash
-    s_n2 = s_mx2 * math.cos(delta)
+    s_n2 = s_mx2 * math.cos(delta)   # the same thicknesses measured normal to the thread
     s_n1 = s_mx1 * math.cos(delta)
     if s_mx1 <= 0:
+        # Backlash has eaten the whole thread: no worm can be made to this spec.
         raise DesignError(["Backlash is larger than the worm axial thread thickness (0.45 p_t2)"])
 
     # Hindley base diameter and effective thread length (4.21, 4.23)
     d_b = d_w2 * math.sin(alpha_x + math.radians(180.0 * s_mx2 / (p_t2 * z2)))  # eq. 20
-    b_1eff = d_b - 0.02 * a  # eq. 21
-    b_f1 = p_t2 / 5.5  # eq. 22 / 23
-    b_2 = d_f1  # 4.26
-    r_f2 = 2 * c + 0.5 * d_a1  # eq. 24
-    r_g1 = 1.06 * (a - d_a1 / 2.0)  # eq. 25
-    r_g2 = r_f2 - h  # eq. 26
+    b_1eff = d_b - 0.02 * a  # eq. 21          length of worm actually cut with thread
+    b_f1 = p_t2 / 5.5  # eq. 22 / 23           flat left on the worm outside diameter
+    b_2 = d_f1  # 4.26                         gear face width, about the worm root diameter
+    r_f2 = 2 * c + 0.5 * d_a1  # eq. 24        gear root form radius
+    r_g1 = 1.06 * (a - d_a1 / 2.0)  # eq. 25   worm throat form radius
+    r_g2 = r_f2 - h  # eq. 26                  gear throat form radius
 
     # Gear diameters in the central plane, from the definitions in 2.2
-    d_a2 = d_w2 + 2 * h_am
-    d_f2 = d_w2 - 2 * h_fm
+    d_a2 = d_w2 + 2 * h_am    # gear throat (tip) diameter
+    d_f2 = d_w2 - 2 * h_fm    # gear root diameter
 
+    # The module can be large enough to leave no worm at all; that is unbuildable.
     if d_w1 <= 0 or d_f1 <= 0:
         raise DesignError([
             f"Axial module {m_a:g} mm gives a worm pitch diameter of {d_w1:.3f} mm and root "
             f"diameter of {d_f1:.3f} mm; reduce the module or the number of gear teeth"
         ])
+    # A worm thinner than eq. (3) is makeable but too weak for the standard's rating.
     if d_f1 < d_f1_min:
         warnings.append(
             f"Worm root diameter {d_f1:.3f} mm is below the minimum {d_f1_min:.3f} mm of eq. (3). "
             "Reduce the gear pitch diameter (smaller axial module) or increase the number of gear teeth (4.17)."
         )
+    # Flag a module far from the first approximation of eq. (2).
     if abs(m_a - m_a_rec) / m_a_rec > 0.10:
         warnings.append(
             f"Axial module {m_a:g} mm differs by more than 10 % from {m_a_rec:.4f} mm obtained with the "
@@ -354,8 +406,11 @@ def calculate(inp: DesignInput) -> dict:
     if b_1eff <= 0:
         warnings.append("Effective worm thread length is not positive; check pressure angle and proportions.")
 
+    # ---- Result tables ---------------------------------------------------
+    # Each Section becomes one heading in the GUI table / CSV / web page.
     geometry = Section("Basic gearset proportions (clause 4)")
     geometry.add("u", "Gear ratio", u, "", "Eq. 1", f"z2/z1 = {z2}/{z1}")
+    # A "hunting tooth" set (z2 not a multiple of z1) spreads wear over all teeth.
     if z2 % z1 == 0:
         geometry.add("", "Tooth combination system", "Even number", "", "3.3", "z2 divisible by z1")
     else:
@@ -366,7 +421,7 @@ def calculate(inp: DesignInput) -> dict:
     geometry.add("d_w1", "Worm pitch diameter (transverse plane)", d_w1, "mm", "Eqs. 4, 6", "2a - m_a*z2")
     geometry.add("d_w2", "Gear pitch diameter (central plane)", d_w2, "mm", "Eq. 6", "m_a*z2")
     geometry.add("p_t2", "Circular pitch (= worm axial pitch)", p_t2, "mm", "Eq. 5")
-    geometry.add("p_z1", "Worm lead", z1 * p_t2, "mm", "", "z1*p_t2")
+    geometry.add("p_z1", "Worm lead", z1 * p_t2, "mm", "", "z1*p_t2")   # advance per worm revolution
     geometry.add("m_a", "Axial module", m_a, "mm", "Eq. 6")
     geometry.add("delta_m1", "Lead angle at pitch point", delta_deg, "deg", "Eq. 7")
     geometry.add("p_n1", "Normal circular pitch", p_n1, "mm", "Eq. 8")
@@ -385,6 +440,7 @@ def calculate(inp: DesignInput) -> dict:
               "45 % of p_t2 minus backlash")
     tooth.add("s_n2", "Normal gear tooth thickness", s_n2, "mm", "2.2", "s_mx2*cos(delta_m1)")
     tooth.add("s_n1", "Normal worm thread thickness", s_n1, "mm", "2.2", "s_mx1*cos(delta_m1)")
+    # Backlash is also quoted as an angle at the gear, which is how it is usually inspected.
     tooth.add("j_x", "Backlash on gear pitch circle", inp.backlash, "mm", "3.5, Annex C",
               f"{math.degrees(inp.backlash / (d_w2 / 2)) * 60:.2f} arc minutes at the gear")
 
@@ -393,7 +449,7 @@ def calculate(inp: DesignInput) -> dict:
     worm.add("d_w1", "Worm pitch diameter", d_w1, "mm", "Eq. 4")
     worm.add("d_f1", "Worm root diameter", d_f1, "mm", "Eq. 18")
     worm.add("d_f1,min", "Minimum worm root diameter", d_f1_min, "mm", "Eq. 3",
-             "OK" if d_f1 >= d_f1_min else "NOT MET")
+             "OK" if d_f1 >= d_f1_min else "NOT MET")   # verdict the GUI colours green/red
     worm.add("d_b", "Base diameter (Hindley design)", d_b, "mm", "Eq. 20")
     worm.add("b_1eff", "Effective worm thread length (Hindley)", b_1eff, "mm", "Eq. 21")
     worm.add("b_f1", "Worm flat length on outside diameter", b_f1, "mm", "Eqs. 22, 23")
@@ -411,58 +467,70 @@ def calculate(inp: DesignInput) -> dict:
     gear.add("r_f2", "Gear root form radius", r_f2, "mm", "Eq. 24")
     gear.add("r_g2", "Gear throat form radius", r_g2, "mm", "Eq. 26")
     gear.add("", "Gear face angle", "30 - 35", "deg", "4.28", "Typical range")
+    # The long contact of a double-enveloping set is what gives it its load capacity.
     gear.add("", "Gear teeth in contact (approx.)", z2 / 8.0, "", "3.1", "About 1/8 of the gear teeth")
     if teeth_row is not None:
         lo, hi, zmin, zmax = teeth_row
+        # The last table 2 band runs to infinity; print "larger" rather than "inf".
         hi_txt = "larger" if math.isinf(hi) else f"{hi:g}"
         gear.add("", "Recommended z2 (table 2)", f"{zmin} min / {zmax} max (multi-thread)", "",
                  "Table 2", f"Center distance {lo:g} - {hi_txt} mm")
 
     blank = Section("Gear blank design (clause 9)")
+    # Minimum bronze thickness under the tooth root, by service severity.
     blank.add("", "Bronze below root, general conditions", 1.5 * h, "mm", "9.1", ">= 1.5 h2")
     blank.add("", "Bronze below root, light non-shock loads", 1.0 * h, "mm", "9.1", ">= 1.0 h2")
     blank.add("s_k", "Bimetal: root to bond line", 10.0 if a <= 300 else 13.0, "mm", "9.1",
               "10 mm up to 300 mm C.D., 13 mm above")
 
+    # Geometry sections are always produced; the rating ones below depend on the speed.
     sections = [geometry, tooth, worm, gear, blank]
 
     # ---- Rating (clause 8) ----------------------------------------------
+    # Everything from here needs a worm speed. Without n1 the design stops at geometry.
     if inp.n1 is not None:
         n1 = inp.n1
-        n2 = n1 / u
+        n2 = n1 / u                 # gear (output) speed
+        # The Annex G curve fits are only valid over a limited range of centre distance / ratio.
         if not 50 <= a <= 1000:
             warnings.append("Rating factors Zw and Zm are defined for 50 - 1000 mm center distance; values are extrapolated.")
         if u < 2:
             warnings.append("Ratio correction factor Zu is defined for ratios of 2 and above; value is extrapolated.")
+
+        # The four rating factors of eq. (27).
         z_w = basic_pressure_factor(a)
         z_u = ratio_correction_factor(u)
         z_m = face_width_material_factor(a)
-        v_g = n1 * d_a1 / (19_098 * math.cos(delta))  # eq. 28
+        v_g = n1 * d_a1 / (19_098 * math.cos(delta))  # eq. 28 — sliding velocity, m/s
         z_v = velocity_factor(v_g)
         if v_g > 30:
             warnings.append(f"Sliding velocity {v_g:.2f} m/s is beyond table 6 (30 m/s); Zv clamped.")
         elif v_g > 10.16:
+            # 2000 ft/min: above this the standard calls for forced/special lubrication.
             warnings.append(
                 f"Sliding velocity {v_g:.2f} m/s exceeds 10.16 m/s: special lubrication may be required (8.3.1, 8.4.3)."
             )
         if n1 <= 100:
             warnings.append("Worm speed of 100 rpm or less is an adverse application; consult the manufacturer (8.3.1).")
-        p1 = 0.746 * n1 / u * z_w * z_u * z_m * z_v  # eq. 27
+        p1 = 0.746 * n1 / u * z_w * z_u * z_m * z_v  # eq. 27 — input power rating at SF 1.0, kW
 
+        # Efficiency: use the entered value, otherwise read figure F.1.
         if inp.efficiency is not None:
             eta_pct, eta_note = inp.efficiency, "User input"
         else:
             eta_pct, eta_note = estimated_efficiency(u, n1), "Estimated from figure F.1 (approx.)"
-        eta = eta_pct / 100.0
+        eta = eta_pct / 100.0       # as a fraction, for the torque and power products
 
+        # Service factor: use the entered value, otherwise table D.1 by duty and load type.
         if inp.service_factor is not None:
             sf, sf_note = inp.service_factor, "User input"
         else:
             sf = service_factor_from_table(inp.hours_per_day, inp.load_type)
             sf_note = f"Table D.1: {inp.hours_per_day:g} h/day, {inp.load_type} load"
 
-        t1_rated = 9549.297 * p1 / n1
-        t2_rated = t1_rated * u * eta
+        # Torques at the rated power. 9549.297 = 30000/pi converts kW and rpm to N*m.
+        t1_rated = 9549.297 * p1 / n1       # worm (input) torque
+        t2_rated = t1_rated * u * eta       # gear (output) torque, after losses
 
         rating = Section("Input power rating (clause 8)")
         rating.add("n1", "Worm speed", n1, "rpm", "8.1.3")
@@ -478,11 +546,13 @@ def calculate(inp: DesignInput) -> dict:
         rating.add("T_1", "Worm torque at rating", t1_rated, "N*m", "", "9549*P_1/n1")
         rating.add("T_2", "Gear torque at rating", t2_rated, "N*m", "", "T_1*u*eta")
         rating.add("SF", "Service factor", sf, "", "Annex D", sf_note)
+        # The figure to compare the application's power against.
         rating.add("P_1/SF", "Allowable input power for the application", p1 / sf, "kW", "8.6.2")
         rating.add("", "Momentary overload limit (300 %)", 3 * p1, "kW", "8.1.2")
         sections.append(rating)
 
         # ---- Mesh forces (Annex B) --------------------------------------
+        # Forces are computed at the applied power if given, otherwise at the rating.
         if inp.input_power is not None:
             p_in, p_note = inp.input_power, "User input"
             if p_in > p1 / sf:
@@ -491,13 +561,13 @@ def calculate(inp: DesignInput) -> dict:
                 )
         else:
             p_in, p_note = p1, "Rated input power P_1"
-        t1 = 9549.297 * p_in / n1
-        t2 = t1 * u * eta
-        d_m1 = d_a1 - h
-        d_m2 = 2 * a - d_m1
-        w_t2 = 2000 * t2 / d_m2  # B.1, = W_a1
-        w_s = w_t2 * math.tan(alpha_x)  # B.2
-        w_a2 = 2000 * t1 / d_m1  # B.3, = W_t1
+        t1 = 9549.297 * p_in / n1   # worm torque at the power used for the forces
+        t2 = t1 * u * eta           # gear torque at that power
+        d_m1 = d_a1 - h             # worm mean diameter, B.2.1
+        d_m2 = 2 * a - d_m1         # gear mean diameter, the rest of 2a
+        w_t2 = 2000 * t2 / d_m2  # B.1, = W_a1   gear tangential force (= worm axial thrust)
+        w_s = w_t2 * math.tan(alpha_x)  # B.2     separating force pushing the members apart
+        w_a2 = 2000 * t1 / d_m1  # B.3, = W_t1   gear axial thrust (= worm tangential force)
 
         forces = Section("Gearing forces (Annex B)")
         forces.add("P", "Input power used for forces", p_in, "kW", "", p_note)
@@ -510,19 +580,23 @@ def calculate(inp: DesignInput) -> dict:
         forces.add("W_a2 = W_t1", "Gear axial thrust / worm tangential force", w_a2, "N", "Eq. B.3")
         sections.append(forces)
 
+        # ---- Worm shaft: bearing loads, bending, deflection (Annex B) ----
+        # Only possible when both bearing positions are known.
         if inp.bearing_la is not None and inp.bearing_lb is not None:
             la, lb = inp.bearing_la, inp.bearing_lb
-            span = la + lb
+            span = la + lb                                  # bearing span L
+            # Each reaction combines an in-plane component (thrust couple + separating force)
+            # with an out-of-plane component (worm tangential force); hypot adds them vectorially.
             ra = math.hypot(w_t2 * d_m1 / (2 * span) + w_s * lb / span, w_a2 * lb / span)  # B.4
             rb = math.hypot(w_t2 * d_m1 / (2 * span) - w_s * la / span, w_a2 * la / span)  # B.5
-            moment = max(ra * la, rb * lb) / 1000.0  # B.6
-            s_b = 32_000 * moment / (math.pi * d_f1 ** 3)  # B.7
-            f_eq = ra + rb  # B.8
-            k = max(ra, rb) / f_eq
-            inertia = math.pi * d_f1 ** 4 / 64  # B.10
+            moment = max(ra * la, rb * lb) / 1000.0  # B.6  worst bending moment, N*m (/1000 from N*mm)
+            s_b = 32_000 * moment / (math.pi * d_f1 ** 3)  # B.7  bending stress at the root diameter
+            f_eq = ra + rb  # B.8                            equivalent single force for deflection
+            k = max(ra, rb) / f_eq                           # where along the span that force acts
+            inertia = math.pi * d_f1 ** 4 / 64  # B.10       second moment of area of the worm core
             y = (f_eq * span ** 3 / (3 * inp.youngs_modulus * inertia)
-                 * (1 - k) * (2 * k / 3 - k * k / 3) ** 1.5)  # B.9
-            y_allow = 0.025 * math.sqrt(p_t2)
+                 * (1 - k) * (2 * k / 3 - k * k / 3) ** 1.5)  # B.9  deflection in the central plane
+            y_allow = 0.025 * math.sqrt(p_t2)                # B.5.1 allowable deflection
 
             strength = Section("Worm shaft bearing loads, bending and deflection (Annex B)")
             strength.add("L", "Bearing span", span, "mm", "B.5", "L_A + L_B")
@@ -531,6 +605,8 @@ def calculate(inp: DesignInput) -> dict:
             strength.add("", "Axial reaction (one bearing)", w_t2, "N", "B.2.1", "Worm thrust W_a1")
             strength.add("M", "Worm shaft bending moment", moment, "N*m", "Eq. B.6")
             strength.add("S_b", "Worm bending stress", s_b, "N/mm^2", "Eq. B.7")
+
+            # Continuous-load check: bending stress against 17 % of the core UTS.
             if inp.worm_uts is not None:
                 allow = 0.17 * inp.worm_uts
                 ok = s_b <= allow
@@ -538,6 +614,9 @@ def calculate(inp: DesignInput) -> dict:
                              "OK" if ok else "EXCEEDED")
                 if not ok:
                     warnings.append("Worm bending stress exceeds 17 % of the core UTS (B.4.1).")
+
+            # Overload check: 300 % of rating, scaled from the power the stress was found at,
+            # against 75 % of the core yield strength.
             if inp.worm_yield is not None:
                 s_b_overload = 3 * s_b * (p1 / p_in)
                 allow = 0.75 * inp.worm_yield
@@ -548,6 +627,7 @@ def calculate(inp: DesignInput) -> dict:
                              "OK" if ok else "EXCEEDED")
                 if not ok:
                     warnings.append("Worm bending stress at momentary overload exceeds 75 % of the core yield strength (B.4.1).")
+
             strength.add("F", "Equivalent force", f_eq, "N", "Eq. B.8")
             strength.add("k", "Load location factor", k, "", "B.5")
             strength.add("I", "Moment of inertia at root diameter", inertia, "mm^4", "Eq. B.10")
@@ -558,8 +638,9 @@ def calculate(inp: DesignInput) -> dict:
                 warnings.append("Worm deflection exceeds 0.025*sqrt(p_t2) (B.5.1); revise the worm design.")
             sections.append(strength)
 
+    # Flatten everything into plain dicts/lists, which are JSON-serialisable.
     return {
-        "inputs": asdict(inp),
+        "inputs": asdict(inp),                      # echo the inputs back (used by the exports)
         "sections": [
             {"title": s.title, "rows": [_row_dict(r) for r in s.rows]} for s in sections
         ],
@@ -568,7 +649,8 @@ def calculate(inp: DesignInput) -> dict:
 
 
 def _row_dict(row: Row) -> dict:
+    """Row -> dict, rounding float values to 4 decimals for display and export."""
     d = asdict(row)
     if isinstance(row.value, float):
-        d["value"] = round(row.value, 4)
+        d["value"] = round(row.value, 4)   # text values (ranges, notes) are left untouched
     return d

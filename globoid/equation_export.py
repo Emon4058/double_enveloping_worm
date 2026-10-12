@@ -19,14 +19,15 @@ evaluate them.
 
 from __future__ import annotations
 
-import re
-import unicodedata
+import re                  # strips the trailing "(clause 4)" from section titles
+import unicodedata         # normalises the text before it is written out
 from typing import Optional
 
 # Design inputs, in the order they are entered, with the symbol used in the
 # standard and the unit that goes into the comment. Rating and strength inputs
 # (speed, power, duty, bearing spans, material strengths) are not modelling
 # dimensions and are not exported.
+# Tuple layout: (key in result["inputs"], symbol, meaning for the comment, unit)
 INPUT_PARAMETERS = [
     ("z2", "z2", "number of teeth in gear (worm wheel)", ""),
     ("z1", "z1", "number of threads (starts) in worm", ""),
@@ -49,7 +50,7 @@ DESIGN_PARAMETERS = frozenset({
     "d_a2", "d_f2", "b_2", "r_f2", "r_g2",
 })
 
-_SAFE_EXTRA = "_"
+_SAFE_EXTRA = "_"   # the only punctuation allowed through unchanged in a variable name
 
 
 def sanitize_name(symbol: str, fallback: str = "") -> str:
@@ -59,49 +60,54 @@ def sanitize_name(symbol: str, fallback: str = "") -> str:
     member; separators such as "." , "," and "/" become underscores and any
     remaining punctuation is dropped. Names cannot start with a digit.
     """
-    text = (symbol or "").split("=")[0].strip()
+    text = (symbol or "").split("=")[0].strip()   # "h1 = h2" -> "h1"
     if not text:
-        text = (fallback or "").strip()
+        text = (fallback or "").strip()           # unnamed rows fall back to their description
     out = []
     for ch in text:
         if ch.isalnum() or ch in _SAFE_EXTRA:
-            out.append(ch)
+            out.append(ch)                        # keep letters, digits and underscores
         elif ch in " .,/-()":
-            out.append("_")
-    name = "".join(out).strip("_")
+            out.append("_")                       # turn separators into underscores
+        # anything else (°, %, ...) is dropped
+    name = "".join(out).strip("_")                # no leading/trailing underscore
     while "__" in name:
-        name = name.replace("__", "_")
+        name = name.replace("__", "_")            # collapse runs of underscores
     if name and name[0].isdigit():
-        name = "p_" + name
+        name = "p_" + name                        # SolidWorks names cannot start with a digit
     return name
 
 
 def _as_number(value) -> Optional[float]:
+    """Return value as a float, or None if it is not a plain number."""
     if isinstance(value, bool):
-        return None
+        return None          # bool is a subclass of int; it is not a dimension
     if isinstance(value, (int, float)):
         return float(value)
-    return None
+    return None              # text values ("30 - 45", "from layout") cannot be exported
 
 
 def format_value(value: float) -> str:
     """Write the number the way the result tables quote it (4 decimals max)."""
     if float(value).is_integer() and abs(value) < 1e15:
-        return str(int(value))
-    return f"{value:.4f}".rstrip("0").rstrip(".")
+        return str(int(value))                        # 30.0 -> "30"
+    return f"{value:.4f}".rstrip("0").rstrip(".")     # 5.4800 -> "5.48"
 
 
 def _comment(text: str, unit: str) -> str:
-    comment = " ".join(str(text).split())
+    """Build the comment that follows the apostrophe: description plus unit."""
+    comment = " ".join(str(text).split())   # collapse newlines and runs of spaces
     if unit:
         comment = f"{comment} [{unit}]" if comment else f"[{unit}]"
     return comment
 
 
 def _line(name: str, value: float, comment: str) -> str:
+    """One equation line: "name" = value'comment."""
     return f'"{name}" = {format_value(value)}' + (f"'{comment}" if comment else "")
 
 
+# Matches a trailing "(clause 4)" / "(Annex B)" on a section title.
 _CLAUSE_REF = re.compile(r"\s*\((?:clause|annex)[^)]*\)\s*$", re.IGNORECASE)
 
 
@@ -112,15 +118,16 @@ def _heading(title: str) -> str:
 
 def equation_blocks(result: dict) -> list[tuple[str, list[str]]]:
     """Group the equation lines as (title, lines), inputs first then sections."""
-    used: set[str] = set()
+    used: set[str] = set()                    # guards against exporting a name twice
     blocks: list[tuple[str, list[str]]] = []
 
+    # First block: the design inputs, in the order of INPUT_PARAMETERS.
     inputs = result.get("inputs") or {}
     lines = []
     for key, symbol, meaning, unit in INPUT_PARAMETERS:
         number = _as_number(inputs.get(key))
         if number is None:
-            continue
+            continue                          # input not entered, or not numeric
         name = sanitize_name(symbol, key)
         if not name or name in used:
             continue
@@ -129,13 +136,15 @@ def equation_blocks(result: dict) -> list[tuple[str, list[str]]]:
     if lines:
         blocks.append(("Design inputs", lines))
 
+    # Then one block per result section, keeping only the modelling dimensions.
     for section in result.get("sections") or []:
         lines = []
         for row in section.get("rows") or []:
             number = _as_number(row.get("value"))
             if number is None:
-                continue
+                continue                      # skip text rows (ranges, notes)
             name = sanitize_name(row.get("symbol", ""), row.get("name", ""))
+            # Export only the whitelisted geometry, and each name only once.
             if name not in DESIGN_PARAMETERS or name in used:
                 continue
             used.add(name)
@@ -150,7 +159,7 @@ def equation_lines(result: dict) -> list[str]:
     out: list[str] = []
     for _title, lines in equation_blocks(result):
         if out:
-            out.append("")
+            out.append("")        # blank separator, but not before the first group
         out.extend(lines)
     return out
 
@@ -167,14 +176,15 @@ def format_equations(result: dict, comments: bool = True) -> str:
         if out:
             out.append("")
         if comments and title:
-            out.append(f"'--- {title} ---")
+            out.append(f"'--- {title} ---")   # leading apostrophe = comment line
         out.extend(lines)
-    return "\n".join(out) + "\n"
+    return "\n".join(out) + "\n"             # trailing newline on the last line
 
 
 def write_equations_txt(path: str, result: dict, comments: bool = True) -> None:
     """Save the equation file. SolidWorks reads the file as plain ASCII/UTF-8."""
     text = format_equations(result, comments=comments)
+    # NFC composes accents into single code points, which SolidWorks parses reliably.
     text = unicodedata.normalize("NFC", text)
     with open(path, "w", encoding="utf-8", newline="\r\n") as handle:
         handle.write(text)
