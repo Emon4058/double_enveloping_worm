@@ -2,8 +2,10 @@
 
 from .calculator import DesignError, DesignInput, calculate
 from .dxf_export import export_worm_wheel_dxf, write_worm_wheel_dxf
+from .equation_export import format_equations, write_equations_txt
 
 __all__ = [
     "DesignError", "DesignInput", "calculate",
     "export_worm_wheel_dxf", "write_worm_wheel_dxf",
+    "format_equations", "write_equations_txt",
 ]

@@ -1,7 +1,8 @@
 """Desktop window for the globoidal worm gearset calculator (Tkinter, standard library).
 
 Opened by `python app.py`. Inputs use the same names and defaults as the web
-dashboard; results are the same sections, warnings and CSV export.
+dashboard; results are the same sections, warnings, CSV, DXF and SolidWorks
+equation exports.
 """
 
 import csv
@@ -9,7 +10,8 @@ import math
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from globoid import DesignError, DesignInput, calculate, write_worm_wheel_dxf
+from globoid import (DesignError, DesignInput, calculate, write_equations_txt,
+                     write_worm_wheel_dxf)
 from globoid.equations import EQUATION_SECTIONS
 
 REQUIRED_FIELDS = [
@@ -120,6 +122,9 @@ class DesignerWindow:
         self.csv_button.pack(side="left", padx=(8, 0))
         self.dxf_button = ttk.Button(buttons, text="Export wheel DXF", command=self.export_dxf, state="disabled")
         self.dxf_button.pack(side="left", padx=(8, 0))
+        self.txt_button = ttk.Button(buttons, text="Export equations TXT", command=self.export_equations,
+                                     state="disabled")
+        self.txt_button.pack(side="left", padx=(8, 0))
 
         self.root.bind("<Return>", lambda _event: self.calculate_clicked())
 
@@ -512,7 +517,9 @@ class DesignerWindow:
             self.result = calculate(DesignInput.from_dict(payload))
         except DesignError as exc:
             self.result = {"errors": exc.errors, "warnings": [], "sections": []}
-        self.csv_button.configure(state="disabled" if self.result.get("errors") else "normal")
+        state = "disabled" if self.result.get("errors") else "normal"
+        self.csv_button.configure(state=state)
+        self.txt_button.configure(state=state)
         self.dxf_button.configure(state="normal" if self._geometry_dims() else "disabled")
         self.render(self.result)
 
@@ -536,6 +543,20 @@ class DesignerWindow:
                     writer.writerow(["Warning", "", warning])
         except OSError as exc:
             messagebox.showerror("Export CSV", f"Could not save the file:\n{exc}", parent=self.root)
+
+    def export_equations(self) -> None:
+        """Save the inputs and results as a SolidWorks equation file."""
+        if not self.result or self.result.get("errors"):
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self.root, defaultextension=".txt", initialfile="globoidal_worm_gearset_equations.txt",
+            filetypes=[("Text files", "*.txt")])
+        if not path:
+            return
+        try:
+            write_equations_txt(path, self.result)
+        except OSError as exc:
+            messagebox.showerror("Export equations", f"Could not save the file:\n{exc}", parent=self.root)
 
     def export_dxf(self) -> None:
         dims = self._geometry_dims()

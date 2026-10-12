@@ -127,6 +127,7 @@
     <div class="buttons">
       <button class="primary" type="submit">Calculate</button>
       <button class="secondary" type="button" id="csv" disabled>Export CSV</button>
+      <button class="secondary" type="button" id="txt" disabled>Export equations TXT</button>
       <button class="secondary" type="button" onclick="window.print()">Print</button>
     </div>
   </form>
@@ -141,7 +142,9 @@
 const form = document.getElementById('form');
 const results = document.getElementById('results');
 const csvBtn = document.getElementById('csv');
+const txtBtn = document.getElementById('txt');
 let lastResult = null;
+let lastPayload = null;
 
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const val = id => parseFloat(document.getElementById(id).value);
@@ -206,6 +209,7 @@ form.addEventListener('submit', async e => {
   e.preventDefault();
   const payload = {};
   for (const [k, v] of new FormData(form).entries()) payload[k] = v;
+  lastPayload = payload;
   try {
     const res = await fetch('/api/calculate', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
@@ -213,6 +217,7 @@ form.addEventListener('submit', async e => {
     const data = await res.json();
     lastResult = data.errors ? null : data;
     csvBtn.disabled = !lastResult;
+    txtBtn.disabled = !lastResult;
     render(data);
   } catch (err) {
     render({errors: ['Could not reach the calculation server: ' + err.message]});
@@ -230,6 +235,19 @@ csvBtn.addEventListener('click', () => {
   const blob = new Blob([lines.join('\n')], {type: 'text/csv'});
   const link = Object.assign(document.createElement('a'),
     {href: URL.createObjectURL(blob), download: 'globoidal_worm_gearset.csv'});
+  link.click();
+  URL.revokeObjectURL(link.href);
+});
+// SolidWorks equation file: the server writes it from the same calculation.
+txtBtn.addEventListener('click', async () => {
+  if (!lastResult) return;
+  const res = await fetch('/api/equations', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(lastPayload)
+  });
+  if (!res.ok) return;
+  const blob = new Blob([await res.text()], {type: 'text/plain'});
+  const link = Object.assign(document.createElement('a'),
+    {href: URL.createObjectURL(blob), download: 'globoidal_worm_gearset_equations.txt'});
   link.click();
   URL.revokeObjectURL(link.href);
 });

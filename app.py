@@ -14,7 +14,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from globoid import DesignError, DesignInput, calculate
+from globoid import DesignError, DesignInput, calculate, format_equations
 
 # When packaged with PyInstaller, bundled files live under sys._MEIPASS.
 BASE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -39,7 +39,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, b"Not found", "text/plain")
 
     def do_POST(self):
-        if self.path != "/api/calculate":
+        # /api/equations returns the same design as a SolidWorks equation file.
+        if self.path not in ("/api/calculate", "/api/equations"):
             self._send(404, b"Not found", "text/plain")
             return
         try:
@@ -53,7 +54,11 @@ class Handler(BaseHTTPRequestHandler):
         except DesignError as exc:
             self._send_json(400, {"errors": exc.errors})
         else:
-            self._send_json(200, result)
+            if self.path == "/api/equations":
+                body = format_equations(result).replace("\n", "\r\n").encode("utf-8")
+                self._send(200, body, "text/plain; charset=utf-8")
+            else:
+                self._send_json(200, result)
 
     def log_message(self, fmt, *args):
         pass
