@@ -14,6 +14,9 @@ from tkinter import filedialog, messagebox, ttk   # save dialogs, error popups, 
 from globoid import (DesignError, DesignInput, calculate, write_equations_txt,
                      write_worm_wheel_dxf)
 from globoid.equations import EQUATION_SECTIONS   # reference text shown on the Equations tab
+# Tooth profile maths, shared with the DXF export so both draw the same teeth.
+from globoid.teeth import (involute_offset, tooth_dimensions, tooth_outline,
+                           tooth_points_xy)
 
 # The five inputs that fix the geometry. Tuple layout: (field name, label, default text).
 # The field names match DesignInput.from_dict, so the form can be submitted as-is.
@@ -438,97 +441,34 @@ class DesignerWindow:
 
     # ----- worm wheel teeth ----------------------------------------------
 
+    # The profile itself lives in globoid/teeth.py, so the sketch below and the
+    # exported DXF draw one and the same tooth. The two wrappers keep the old
+    # method names working.
+
     @staticmethod
     def _involute_offset(r_b, r, half_angle, inv_alpha):
-        """Angle from a tooth centre line to its flank at radius r.
-
-        In the central plane the straight-sided worm thread acts as a rack, so
-        the gear tooth profile there is an involute of the base circle
-        rb = (dw2/2) cos(alpha_x). The offset is half_angle at the pitch circle
-        and closes in towards the tip. Inside the base circle the flank is
-        drawn radially, which is the constant the formula returns there.
-        """
-        if r <= r_b:
-            return half_angle + inv_alpha              # below the base circle: radial flank
-        alpha_r = math.acos(min(1.0, r_b / r))         # pressure angle at this radius
-        # The involute function tan(a) - a, subtracted so the flank converges to the tip.
-        return half_angle + inv_alpha - (math.tan(alpha_r) - alpha_r)
+        """Angle from a tooth centre line to its flank at radius r (see globoid.teeth)."""
+        return involute_offset(r_b, r, half_angle, inv_alpha)
 
     def _tooth_outline(self, z, d_pitch, d_tip, d_root, s_pitch, alpha_deg, phase,
                        flank_steps=9, arc_steps=4):
-        """Polar points (r, theta) tracing every tooth of the gear, once round.
-
-        Tooth count, thickness and the tip and root diameters are the
-        calculated ones, so the teeth drawn are the teeth of the result table:
-        z2 of them, s_mx2 thick on the pitch circle, running from df2 to da2.
-        """
-        r_p, r_a, r_f = d_pitch / 2.0, d_tip / 2.0, d_root / 2.0   # pitch, tip, root radii
-        alpha = math.radians(alpha_deg)
-        r_b = r_p * math.cos(alpha)                 # base circle of the involute
-        inv_alpha = math.tan(alpha) - alpha         # involute function at the pitch circle
-        half_angle = s_pitch / d_pitch  # half the tooth arc at the pitch circle
-
-        def offset(r):
-            """Half the angular tooth width at radius r."""
-            return self._involute_offset(r_b, r, half_angle, inv_alpha)
-
-        r_lo = max(r_f, r_b)        # the involute only exists outside the base circle
-        r_hi = max(r_lo, r_a)
-        if offset(r_lo) <= 0:
-            return []               # no tooth at all: nothing sensible to draw
-
-        # A tooth that comes to a point below the throat diameter is drawn only
-        # as far as the two flanks meet.
-        if offset(r_hi) <= 0:
-            # Bisection for the radius where the tooth width reaches zero.
-            lo, hi = r_lo, r_hi
-            for _ in range(40):
-                mid = (lo + hi) / 2.0
-                lo, hi = (mid, hi) if offset(mid) > 0 else (lo, mid)
-            r_hi = lo
-
-        pitch_angle = 2 * math.pi / z   # angle from one tooth to the next
-        # Radii at which the flank is sampled, from r_lo up to the tip.
-        radii = [r_lo + (r_hi - r_lo) * i / flank_steps for i in range(flank_steps + 1)]
-        if r_f < r_lo:
-            radii.insert(0, r_f)        # add the radial piece down to the root
-
-        points = []
-        for k in range(z):                        # once round the gear
-            centre = phase + k * pitch_angle      # this tooth's centre line
-            for r in radii:  # up the trailing flank
-                points.append((r, centre - offset(r)))
-            top = offset(r_hi)
-            if top > 1e-6:  # across the tip
-                for i in range(1, arc_steps):
-                    points.append((r_hi, centre - top + 2 * top * i / arc_steps))
-            for r in reversed(radii):  # down the leading flank
-                points.append((r, centre + offset(r)))
-            start = centre + offset(r_f)  # root arc across to the next tooth
-            end = centre + pitch_angle - offset(r_f)
-            for i in range(1, arc_steps + 1):
-                points.append((r_f, start + (end - start) * i / arc_steps))
-        return points
+        """Polar points (r, theta) tracing every tooth, once round (see globoid.teeth)."""
+        return tooth_outline(z, d_pitch, d_tip, d_root, s_pitch, alpha_deg, phase,
+                             flank_steps=flank_steps, arc_steps=arc_steps)
 
     def _draw_teeth(self, tf, cx, cy, d, color="#1f4e79", width=1) -> bool:
         """Draw the worm wheel teeth about (cx, cy). False if they are unknown."""
-        z, s_pitch, alpha = d.get("z2"), d.get("s_mx2"), d.get("alpha_x")
-        if not all(isinstance(v, (int, float)) for v in (z, s_pitch, alpha)):
+        teeth = tooth_dimensions(d)
+        if teeth is None:
             return False            # caller then draws a plain tip circle instead
-        if z < 3 or s_pitch <= 0 or d["d_f2"] <= 0:
-            return False            # degenerate geometry
-        # A tooth space is centred on the line of centres, where the worm
-        # thread meshes; the gear centre sits one centre distance above O1.
-        phase = -math.pi / 2 + math.pi / z
-        points = self._tooth_outline(int(z), d["d_w2"], d["d_a2"], d["d_f2"],
-                                     s_pitch, alpha, phase)
+        z, s_pitch, alpha = teeth
+        # phase defaults to mesh_phase(z): a tooth space on the -y axis, where the
+        # worm thread meshes, since the gear centre sits one centre distance above O1.
+        points = tooth_points_xy(cx, cy, z, d["d_w2"], d["d_a2"], d["d_f2"], s_pitch, alpha)
         if len(points) < 4:
             return False
-        # Convert the polar outline to a flat [x1, y1, x2, y2, ...] pixel list.
-        # points[:1] repeats the first point, closing the outline.
-        flat = []
-        for r, theta in points + points[:1]:
-            flat.extend(tf(cx + r * math.cos(theta), cy + r * math.sin(theta)))
+        # Map the closed outline to a flat [x1, y1, x2, y2, ...] pixel list.
+        flat = [coord for x, y in points for coord in tf(x, y)]
         self.canvas.create_line(*flat, fill=color, width=width)
         return True
 

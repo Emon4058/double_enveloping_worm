@@ -8,12 +8,15 @@ can open the result.
 A DXF file is a sequence of (group code, value) pairs, one per line. The codes
 used below are: 0 entity type, 2 name, 6 linetype, 8 layer, 10/20/30 first
 point x/y/z, 11/21/31 second point, 40 radius or text height, 62 colour,
-70/72/73 flags and counts, 1 text string, 49 dash length.
+66 "vertices follow", 70/72/73 flags and counts, 1 text string, 49 dash length.
 """
 
 from __future__ import annotations
 
 import io   # StringIO builds the file in memory, which is faster than string concatenation
+
+# The tooth profile is shared with the on-screen sketch in gui.py.
+from .teeth import tooth_dimensions, tooth_points_xy
 
 
 def _header() -> str:
@@ -33,6 +36,7 @@ def _tables() -> str:
         ("PITCH", 30, "DASHED"),        # orange- pitch diameter
         ("ROOT", 8, "DOT"),             # grey  - root diameter
         ("WIDTH", 8, "CONTINUOUS"),     #         rim outline in the axial section
+        ("TEETH", 3, "CONTINUOUS"),     # green - tooth profile in the front view
         ("TEXT", 7, "CONTINUOUS"),      #         dimension labels
     )
     out = io.StringIO()
@@ -73,6 +77,23 @@ def _text(layer: str, x: float, y: float, height: float, value: str) -> str:
     return (f"0\nTEXT\n8\n{layer}\n10\n{x}\n20\n{y}\n30\n0.0\n40\n{height}\n1\n{value}\n")
 
 
+def _polyline(layer: str, points, closed: bool = True) -> str:
+    """One POLYLINE entity through `points`, as a single selectable profile.
+
+    R12 has no LWPOLYLINE, so a polyline is a POLYLINE header (66 = vertices
+    follow, 70 bit 1 = closed) followed by one VERTEX per point and a SEQEND.
+    Chained LINEs would draw the same shape, but a polyline is what a CAD user
+    needs to offset, trim or extrude the tooth profile in one go.
+    """
+    out = io.StringIO()
+    out.write(f"0\nPOLYLINE\n8\n{layer}\n66\n1\n70\n{1 if closed else 0}\n"
+              "10\n0.0\n20\n0.0\n30\n0.0\n")   # the header's own point is unused
+    for x, y in points:
+        out.write(f"0\nVERTEX\n8\n{layer}\n10\n{x}\n20\n{y}\n30\n0.0\n")
+    out.write(f"0\nSEQEND\n8\n{layer}\n")       # closes the vertex list
+    return out.getvalue()
+
+
 def _globoid_radius(a: float, r_throat: float, axial: float) -> float:
     """Radius of a globoid surface at `axial` from the centre plane.
 
@@ -111,6 +132,11 @@ def export_worm_wheel_dxf(dims: dict) -> str:
     b_2 (face width, mm) and a (centre distance, mm), as produced by the
     calculator. The centre distance fixes the throating of the rim; without it
     the axial section falls back to a plain cylindrical rim.
+
+    z2, s_mx2 and alpha_x are optional: given them, the front view also carries
+    the tooth profile of the central plane on the TEETH layer. The axial section
+    needs no extra work, since its tip and root arcs already are the tooth tip
+    and root surfaces.
     """
     d_a2, d_w2, d_f2, b2 = dims["d_a2"], dims["d_w2"], dims["d_f2"], dims["b_2"]
     a = dims.get("a")
@@ -127,6 +153,18 @@ def export_worm_wheel_dxf(dims: dict) -> str:
     out.write(_circle("OUTSIDE", 0, 0, d_a2 / 2))
     out.write(_circle("PITCH", 0, 0, d_w2 / 2))
     out.write(_circle("ROOT", 0, 0, d_f2 / 2))
+
+    # Tooth profile over those circles, on its own layer so it can be turned off.
+    # Needs the tooth count, thickness and axial pressure angle; without them the
+    # drawing is still produced, just with the circles alone.
+    teeth = tooth_dimensions(dims)
+    if teeth is not None:
+        z2, s_mx2, alpha_x = teeth
+        # phase defaults to a tooth space on the -y axis, where the worm meshes,
+        # which is the orientation the on-screen sketch uses.
+        profile = tooth_points_xy(0.0, 0.0, z2, d_w2, d_a2, d_f2, s_mx2, alpha_x)
+        if len(profile) >= 4:
+            out.write(_polyline("TEETH", profile))
     # Half width actually covered by the throating arcs: the tip arc is the
     # tightest of the three, so it sets where the gear faces fall.
     half_width = min(b2 / 2, 0.995 * (a - d_a2 / 2)) if throated else b2 / 2
@@ -137,6 +175,10 @@ def export_worm_wheel_dxf(dims: dict) -> str:
     out.write(_text("TEXT", 0, d_a2 / 2 + text_h, text_h, f"da2 = {d_a2:.2f}"))
     out.write(_text("TEXT", 0, d_w2 / 2 + text_h * 0.2, text_h, f"dw2 = {d_w2:.2f}"))
     out.write(_text("TEXT", 0, -d_f2 / 2 - text_h, text_h, f"df2 = {d_f2:.2f}"))
+    if teeth is not None:
+        # Tooth data below the front view, clear of the diameter labels.
+        out.write(_text("TEETH", -d_a2 / 2, -d_a2 / 2 - text_h * 2.4, text_h,
+                        f"z2 = {teeth[0]} teeth, smx2 = {teeth[1]:.2f} on dw2"))
     if throated:
         out.write(_circle("WIDTH", 0, 0, d_e2 / 2))
         out.write(_text("TEXT", 0, d_e2 / 2 + text_h, text_h, f"de2 = {d_e2:.2f}"))
